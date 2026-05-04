@@ -1,0 +1,1977 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Tonkl Block Explorer</title>
+<style>
+/* ─── Reset & Base ─── */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+:root {
+  --bg: #0a0e17;
+  --bg-card: #111827;
+  --bg-card-hover: #1a2332;
+  --bg-input: #1e293b;
+  --border: #1e293b;
+  --border-focus: #6366f1;
+  --text: #e2e8f0;
+  --text-dim: #94a3b8;
+  --text-muted: #64748b;
+  --accent: #6366f1;
+  --accent-glow: rgba(99, 102, 241, 0.15);
+  --green: #22c55e;
+  --green-dim: rgba(34, 197, 94, 0.15);
+  --red: #ef4444;
+  --red-dim: rgba(239, 68, 68, 0.15);
+  --yellow: #eab308;
+  --yellow-dim: rgba(234, 179, 8, 0.15);
+  --cyan: #06b6d4;
+  --cyan-dim: rgba(6, 182, 212, 0.15);
+  --orange: #f97316;
+  --orange-dim: rgba(249, 115, 22, 0.15);
+  --mono: 'SF Mono', 'Cascadia Code', 'Fira Code', 'Consolas', monospace;
+  --sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  --radius: 8px;
+  --radius-lg: 12px;
+  --transition: 0.2s ease;
+}
+
+/* ─── Light Theme ─── */
+[data-theme="light"] {
+  --bg: #f8fafc;
+  --bg-card: #ffffff;
+  --bg-card-hover: #f1f5f9;
+  --bg-input: #e2e8f0;
+  --border: #e2e8f0;
+  --border-focus: #6366f1;
+  --text: #1e293b;
+  --text-dim: #475569;
+  --text-muted: #94a3b8;
+  --accent-glow: rgba(99, 102, 241, 0.1);
+  --green-dim: rgba(34, 197, 94, 0.1);
+  --red-dim: rgba(239, 68, 68, 0.1);
+  --yellow-dim: rgba(234, 179, 8, 0.1);
+  --cyan-dim: rgba(6, 182, 212, 0.1);
+  --orange-dim: rgba(249, 115, 22, 0.1);
+}
+
+body {
+  font-family: var(--sans);
+  background: var(--bg);
+  color: var(--text);
+  line-height: 1.6;
+  min-height: 100vh;
+  transition: background var(--transition), color var(--transition);
+}
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+
+/* ─── Layout ─── */
+.header {
+  background: linear-gradient(180deg, rgba(99,102,241,0.08) 0%, transparent 100%);
+  border-bottom: 1px solid var(--border);
+  padding: 12px 24px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  position: sticky;
+  top: 0;
+  z-index: 100;
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+}
+.header-left { display: flex; align-items: center; gap: 12px; }
+.logo {
+  width: 32px; height: 32px;
+  background: var(--accent);
+  border-radius: 8px;
+  display: flex; align-items: center; justify-content: center;
+  font-weight: 700; font-size: 16px; color: white;
+}
+.header h1 { font-size: 18px; font-weight: 600; }
+.header h1 span { color: var(--text-dim); font-weight: 400; }
+
+.header-center { flex: 1; max-width: 480px; min-width: 200px; position: relative; }
+.global-search {
+  width: 100%;
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 12px;
+  padding: 8px 12px 8px 32px;
+  transition: border-color var(--transition);
+}
+.global-search:focus { outline: none; border-color: var(--border-focus); }
+.global-search::placeholder { color: var(--text-muted); }
+.search-icon {
+  position: absolute;
+  left: 10px;
+  top: 50%;
+  transform: translateY(-50%);
+  color: var(--text-muted);
+  font-size: 14px;
+  pointer-events: none;
+}
+.search-hint {
+  display: none;
+  position: absolute;
+  top: 100%;
+  left: 0;
+  right: 0;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  margin-top: 4px;
+  padding: 8px 12px;
+  font-size: 11px;
+  color: var(--text-dim);
+  z-index: 200;
+  box-shadow: 0 8px 24px rgba(0,0,0,0.3);
+}
+.global-search:focus ~ .search-hint { display: block; }
+
+.header-right { display: flex; align-items: center; gap: 10px; }
+
+.node-url-input {
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 11px;
+  padding: 6px 10px;
+  width: 200px;
+  transition: border-color var(--transition);
+}
+.node-url-input:focus { outline: none; border-color: var(--border-focus); }
+
+.status-pill {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border-radius: 20px;
+  font-size: 11px;
+  font-weight: 500;
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  transition: all var(--transition);
+}
+.status-pill .dot {
+  width: 6px; height: 6px;
+  border-radius: 50%;
+  background: var(--text-muted);
+  transition: background 0.3s;
+}
+.status-pill.connected { border-color: rgba(34, 197, 94, 0.3); }
+.status-pill.connected .dot { background: var(--green); box-shadow: 0 0 6px var(--green); }
+.status-pill.error { border-color: rgba(239, 68, 68, 0.3); }
+.status-pill.error .dot { background: var(--red); box-shadow: 0 0 6px var(--red); }
+
+.theme-toggle {
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text-dim);
+  font-size: 14px;
+  width: 32px; height: 32px;
+  display: flex; align-items: center; justify-content: center;
+  cursor: pointer;
+  transition: all var(--transition);
+}
+.theme-toggle:hover { color: var(--text); border-color: var(--accent); }
+
+.refresh-toggle {
+  display: flex; align-items: center; gap: 5px;
+  font-size: 11px; color: var(--text-dim);
+  cursor: pointer; user-select: none;
+}
+.refresh-toggle input { accent-color: var(--accent); }
+
+.main { max-width: 1200px; margin: 0 auto; padding: 24px; }
+
+/* ─── Tab Nav ─── */
+.tabs {
+  display: flex; gap: 2px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: 4px;
+  margin-bottom: 24px;
+  overflow-x: auto;
+}
+.tab {
+  padding: 8px 16px;
+  border-radius: var(--radius);
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-dim);
+  cursor: pointer;
+  transition: all 0.15s;
+  white-space: nowrap;
+  border: none;
+  background: none;
+  position: relative;
+}
+.tab:hover { color: var(--text); background: var(--bg-card-hover); }
+.tab.active { color: white; background: var(--accent); }
+.tab-badge {
+  position: absolute;
+  top: 2px;
+  right: 4px;
+  background: var(--red);
+  color: white;
+  font-size: 9px;
+  font-weight: 700;
+  padding: 1px 5px;
+  border-radius: 10px;
+  min-width: 16px;
+  text-align: center;
+}
+
+/* ─── Cards ─── */
+.card {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: 20px;
+  margin-bottom: 16px;
+  transition: border-color var(--transition);
+}
+.card:hover { border-color: rgba(99,102,241,0.2); }
+.card-title {
+  font-size: 13px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-dim);
+  margin-bottom: 12px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.card-title .count {
+  background: var(--accent-glow);
+  color: var(--accent);
+  font-size: 11px;
+  padding: 1px 8px;
+  border-radius: 10px;
+}
+
+/* ─── Stat Grid ─── */
+.stat-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 16px;
+  margin-bottom: 24px;
+}
+.stat-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: 20px;
+  transition: border-color var(--transition), transform var(--transition);
+}
+.stat-card:hover { border-color: var(--accent); transform: translateY(-1px); }
+.stat-label {
+  font-size: 12px;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin-bottom: 4px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.stat-icon { font-size: 14px; }
+.stat-value {
+  font-size: 28px;
+  font-weight: 700;
+  font-family: var(--mono);
+  color: var(--text);
+}
+.stat-value.accent { color: var(--accent); }
+.stat-sub {
+  font-size: 11px;
+  color: var(--text-muted);
+  font-family: var(--mono);
+  margin-top: 4px;
+  word-break: break-all;
+}
+.stat-change {
+  font-size: 11px;
+  font-weight: 600;
+  margin-top: 2px;
+}
+.stat-change.up { color: var(--green); }
+.stat-change.down { color: var(--red); }
+
+/* ─── Two-column layout ─── */
+.two-col {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+}
+
+/* ─── Tables ─���─ */
+.table-wrap { overflow-x: auto; }
+table { width: 100%; border-collapse: collapse; }
+th {
+  text-align: left;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-muted);
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+}
+td {
+  padding: 10px 12px;
+  font-size: 13px;
+  border-bottom: 1px solid var(--border);
+  vertical-align: middle;
+}
+tr { transition: background var(--transition); }
+tr:hover td { background: var(--bg-card-hover); }
+.mono { font-family: var(--mono); font-size: 12px; }
+.hash { color: var(--accent); cursor: pointer; }
+.hash:hover { text-decoration: underline; }
+
+/* ─── Badges ─── */
+.badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+.badge-mint { background: var(--green-dim); color: var(--green); }
+.badge-transfer { background: var(--accent-glow); color: var(--accent); }
+.badge-split { background: var(--yellow-dim); color: var(--yellow); }
+.badge-merge { background: var(--cyan-dim); color: var(--cyan); }
+.badge-confirmed { background: var(--green-dim); color: var(--green); }
+.badge-pending { background: var(--yellow-dim); color: var(--yellow); }
+.badge-unknown { background: rgba(100,116,139,0.2); color: var(--text-muted); }
+.badge-spent { background: var(--red-dim); color: var(--red); }
+.badge-unspent { background: var(--green-dim); color: var(--green); }
+
+/* ─── Activity Feed ─── */
+.activity-feed { max-height: 300px; overflow-y: auto; }
+.activity-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--border);
+  animation: fadeIn 0.3s ease;
+}
+.activity-item:last-child { border-bottom: none; }
+.activity-icon {
+  width: 32px; height: 32px;
+  border-radius: 8px;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 14px;
+  flex-shrink: 0;
+}
+.activity-icon.block { background: var(--accent-glow); color: var(--accent); }
+.activity-icon.tx { background: var(--green-dim); color: var(--green); }
+.activity-info { flex: 1; min-width: 0; }
+.activity-title { font-size: 13px; font-weight: 500; }
+.activity-sub { font-size: 11px; color: var(--text-muted); font-family: var(--mono); }
+.activity-time { font-size: 11px; color: var(--text-muted); white-space: nowrap; }
+
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(-8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+/* ─── Type Breakdown Bar ─── */
+.type-bar {
+  display: flex;
+  height: 8px;
+  border-radius: 4px;
+  overflow: hidden;
+  margin: 8px 0;
+}
+.type-bar-seg { transition: width 0.5s ease; min-width: 2px; }
+.type-bar-seg.mint { background: var(--green); }
+.type-bar-seg.transfer { background: var(--accent); }
+.type-bar-seg.split { background: var(--yellow); }
+.type-bar-seg.merge { background: var(--cyan); }
+
+.type-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-top: 8px;
+}
+.type-legend-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+.type-legend-dot {
+  width: 8px; height: 8px;
+  border-radius: 2px;
+}
+
+/* ─── Search / Inputs ─── */
+.search-bar {
+  display: flex; gap: 8px; margin-bottom: 20px;
+}
+.search-input {
+  flex: 1;
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 13px;
+  padding: 10px 14px;
+  transition: border-color var(--transition);
+}
+.search-input:focus { outline: none; border-color: var(--border-focus); }
+.search-input::placeholder { color: var(--text-muted); }
+.btn {
+  background: var(--accent);
+  color: white;
+  border: none;
+  border-radius: var(--radius);
+  padding: 10px 20px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: opacity 0.15s, transform 0.1s;
+  white-space: nowrap;
+}
+.btn:hover { opacity: 0.85; }
+.btn:active { transform: scale(0.98); }
+.btn-secondary {
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  color: var(--text);
+}
+.btn-sm {
+  padding: 6px 14px;
+  font-size: 12px;
+}
+.btn-success { background: var(--green); }
+.btn-danger { background: var(--red); }
+
+/* ─── Detail View ─── */
+.detail-grid {
+  display: grid;
+  grid-template-columns: 160px 1fr;
+  gap: 0;
+}
+.detail-label {
+  padding: 10px 12px;
+  font-size: 12px;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  border-bottom: 1px solid var(--border);
+}
+.detail-value {
+  padding: 10px 12px;
+  font-size: 13px;
+  font-family: var(--mono);
+  border-bottom: 1px solid var(--border);
+  word-break: break-all;
+}
+
+/* Block navigation */
+.block-nav {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 16px;
+}
+.block-nav-btn {
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text);
+  padding: 6px 14px;
+  font-size: 12px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  transition: all var(--transition);
+}
+.block-nav-btn:hover { border-color: var(--accent); color: var(--accent); }
+.block-nav-btn:disabled { opacity: 0.3; cursor: not-allowed; }
+.block-nav-title { font-size: 16px; font-weight: 600; }
+
+/* ─── Expandable sections ─── */
+.expandable-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  cursor: pointer;
+  padding: 8px 0;
+  user-select: none;
+}
+.expandable-header:hover { color: var(--accent); }
+.expandable-arrow { transition: transform 0.2s; font-size: 12px; }
+.expandable-arrow.open { transform: rotate(90deg); }
+.expandable-body { display: none; padding-top: 8px; }
+.expandable-body.open { display: block; }
+
+/* ─── Tree Visualizer ─── */
+.tree-stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 12px;
+  margin-bottom: 20px;
+}
+.tree-stat {
+  background: var(--bg-input);
+  border-radius: var(--radius);
+  padding: 14px;
+  text-align: center;
+}
+.tree-stat-val {
+  font-size: 20px;
+  font-weight: 700;
+  font-family: var(--mono);
+  color: var(--accent);
+}
+.tree-stat-label {
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-top: 2px;
+}
+
+/* ─── Paging ─── */
+.paging {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  margin-top: 16px;
+}
+.paging button {
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text);
+  padding: 6px 14px;
+  font-size: 12px;
+  cursor: pointer;
+  transition: all var(--transition);
+}
+.paging button:hover:not(:disabled) { border-color: var(--accent); }
+.paging button:disabled { opacity: 0.4; cursor: not-allowed; }
+.paging span { font-size: 12px; color: var(--text-dim); }
+
+/* ─── Views (hide all, show active) ─── */
+.view { display: none; }
+.view.active { display: block; }
+
+/* ─── Empty / Error States ─── */
+.empty-state {
+  text-align: center;
+  padding: 48px 20px;
+  color: var(--text-muted);
+  font-size: 14px;
+}
+.error-state {
+  background: var(--red-dim);
+  border: 1px solid rgba(239, 68, 68, 0.3);
+  border-radius: var(--radius);
+  padding: 12px 16px;
+  color: var(--red);
+  font-size: 13px;
+  margin-bottom: 16px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* ─── Network info items ���── */
+.network-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 16px;
+}
+.network-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 14px;
+  background: var(--bg-input);
+  border-radius: var(--radius);
+}
+.network-item-icon {
+  width: 36px; height: 36px;
+  border-radius: 8px;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 16px;
+  background: var(--accent-glow);
+  color: var(--accent);
+}
+.network-item-info { flex: 1; }
+.network-item-label { font-size: 11px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.03em; }
+.network-item-value { font-size: 14px; font-weight: 600; font-family: var(--mono); }
+
+/* ─── Tooltips ─── */
+[data-tooltip] {
+  position: relative;
+  cursor: help;
+}
+[data-tooltip]:hover::after {
+  content: attr(data-tooltip);
+  position: absolute;
+  bottom: 100%;
+  left: 50%;
+  transform: translateX(-50%);
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 4px 8px;
+  font-size: 11px;
+  white-space: nowrap;
+  z-index: 300;
+  color: var(--text);
+  box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+}
+
+/* ─── Pulse animation for new blocks ─── */
+@keyframes pulse {
+  0% { box-shadow: 0 0 0 0 rgba(99, 102, 241, 0.4); }
+  70% { box-shadow: 0 0 0 8px rgba(99, 102, 241, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(99, 102, 241, 0); }
+}
+.pulse { animation: pulse 1s ease-out; }
+
+/* ─── Responsive ─── */
+@media (max-width: 768px) {
+  .header { padding: 10px 16px; }
+  .header-center { order: 3; flex-basis: 100%; max-width: 100%; }
+  .main { padding: 16px; }
+  .stat-grid { grid-template-columns: 1fr 1fr; }
+  .two-col { grid-template-columns: 1fr; }
+  .detail-grid { grid-template-columns: 1fr; }
+  .detail-label { border-bottom: none; padding-bottom: 0; }
+  .node-url-input { width: 140px; font-size: 10px; }
+  .tabs { gap: 0; }
+  .tab { padding: 8px 12px; font-size: 12px; }
+}
+@media (max-width: 480px) {
+  .stat-grid { grid-template-columns: 1fr; }
+  .stat-value { font-size: 22px; }
+  .block-nav { flex-direction: column; gap: 8px; }
+}
+</style>
+</head>
+<body>
+
+<!-- ─── Header ─── -->
+<div class="header">
+  <div class="header-left">
+    <div class="logo">T</div>
+    <h1>Tonkl <span>Explorer</span></h1>
+  </div>
+
+  <div class="header-center">
+    <span class="search-icon">&#x1F50D;</span>
+    <input type="text" class="global-search" id="globalSearch"
+           placeholder="Search block #, tx hash, or nullifier...">
+    <div class="search-hint">
+      <strong>Tip:</strong> Enter a number for blocks, 0x... for tx hash or nullifier lookup. Press Enter to search.
+    </div>
+  </div>
+
+  <div class="header-right">
+    <div class="status-pill" id="statusPill" title="Disconnected">
+      <div class="dot"></div>
+      <span id="statusLabel">Offline</span>
+    </div>
+    <input type="text" class="node-url-input" id="nodeUrl"
+           value="http://127.0.0.1:9100" placeholder="Node URL">
+    <label class="refresh-toggle">
+      <input type="checkbox" id="autoRefresh" checked> Auto
+    </label>
+    <button class="theme-toggle" id="themeToggle" title="Toggle theme">&#9790;</button>
+  </div>
+</div>
+
+<!-- ─── Main ─��─ -->
+<div class="main">
+  <!-- Tabs -->
+  <div class="tabs" id="tabs">
+    <button class="tab active" data-view="overview">Overview</button>
+    <button class="tab" data-view="blocks">Blocks</button>
+    <button class="tab" data-view="block-detail">Block Detail</button>
+    <button class="tab" data-view="tx-lookup">TX Lookup</button>
+    <button class="tab" data-view="nullifiers">Nullifiers</button>
+    <button class="tab" data-view="merkle">Merkle Tree</button>
+    <button class="tab" data-view="mempool">Mempool</button>
+    <button class="tab" data-view="faucet">Faucet</button>
+    <button class="tab" data-view="network">Network</button>
+  </div>
+
+  <div id="errorBanner" class="error-state" style="display:none">
+    <span>&#x26A0;</span>
+    <span id="errorText"></span>
+  </div>
+
+  <!-- ═══ Overview ═══ -->
+  <div class="view active" id="view-overview">
+    <div class="stat-grid" id="overviewStats">
+      <div class="stat-card">
+        <div class="stat-label"><span class="stat-icon">&#x25A3;</span> Block Height</div>
+        <div class="stat-value accent" id="statHeight">—</div>
+        <div class="stat-sub" id="statBlockTime"></div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label"><span class="stat-icon">&#x1F333;</span> Merkle Leaves</div>
+        <div class="stat-value" id="statLeaves">—</div>
+        <div class="stat-sub" id="statLeafRate"></div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label"><span class="stat-icon">&#x26D4;</span> Nullifiers</div>
+        <div class="stat-value" id="statNullifiers">—</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label"><span class="stat-icon">&#x23F3;</span> Mempool</div>
+        <div class="stat-value" id="statMempool">—</div>
+        <div class="stat-sub" id="statMempoolHint"></div>
+      </div>
+    </div>
+
+    <!-- Merkle Root -->
+    <div class="card">
+      <div class="card-title">Merkle Root</div>
+      <div class="mono" id="statMerkleRoot" style="word-break:break-all;font-size:12px;color:var(--accent)">—</div>
+    </div>
+
+    <div class="two-col">
+      <!-- Recent Blocks -->
+      <div class="card">
+        <div class="card-title">Recent Blocks <span class="count" id="recentBlockCount">0</span></div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>#</th><th>State Root</th><th>TXs</th><th>Time</th></tr></thead>
+            <tbody id="recentBlocksBody"></tbody>
+          </table>
+        </div>
+        <div class="empty-state" id="recentBlocksEmpty">No blocks yet</div>
+      </div>
+
+      <!-- Activity Feed -->
+      <div class="card">
+        <div class="card-title">Activity Feed</div>
+        <div class="activity-feed" id="activityFeed">
+          <div class="empty-state" id="activityEmpty">Waiting for chain activity...</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Chain Stats -->
+    <div class="card" id="chainStatsCard">
+      <div class="card-title">Chain Statistics</div>
+      <div id="chainStatsContent">
+        <div class="empty-state">Connect to a node to see chain statistics</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══ Blocks List ═���═ -->
+  <div class="view" id="view-blocks">
+    <div class="card">
+      <div class="card-title">All Blocks <span class="count" id="totalBlockCount">0</span></div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>#</th><th>State Root</th><th>TXs</th><th>Nullifiers</th><th>Timestamp</th></tr></thead>
+          <tbody id="allBlocksBody"></tbody>
+        </table>
+      </div>
+      <div class="empty-state" id="allBlocksEmpty">No blocks yet</div>
+      <div class="paging" id="blocksPaging">
+        <button id="blocksPrev" disabled>&#x25C0; Prev</button>
+        <span id="blocksPageInfo">—</span>
+        <button id="blocksNext" disabled>Next &#x25B6;</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══ Block Detail ═══ -->
+  <div class="view" id="view-block-detail">
+    <div class="search-bar">
+      <input type="number" class="search-input" id="blockNumInput" placeholder="Enter block number..." min="0">
+      <button class="btn" onclick="lookupBlock()">View Block</button>
+    </div>
+    <div id="blockDetailContent"></div>
+  </div>
+
+  <!-- ═══ TX Lookup ═══ -->
+  <div class="view" id="view-tx-lookup">
+    <div class="search-bar">
+      <input type="text" class="search-input" id="txHashInput" placeholder="Enter transaction hash (0x...)">
+      <button class="btn" onclick="lookupTx()">Lookup</button>
+    </div>
+    <div id="txDetailContent"></div>
+  </div>
+
+  <!-- ═══ Nullifiers ═══ -->
+  <div class="view" id="view-nullifiers">
+    <div class="search-bar">
+      <input type="text" class="search-input" id="nullifierInput" placeholder="Enter nullifier hash (0x...)">
+      <button class="btn" onclick="lookupNullifier()">Check</button>
+    </div>
+    <div id="nullifierResult"></div>
+  </div>
+
+  <!-- ���══ Merkle Tree ═══ -->
+  <div class="view" id="view-merkle">
+    <div class="tree-stats" id="treeStats">
+      <div class="tree-stat">
+        <div class="tree-stat-val" id="treeRoot">—</div>
+        <div class="tree-stat-label">Root (first 16 chars)</div>
+      </div>
+      <div class="tree-stat">
+        <div class="tree-stat-val" id="treeLeaves">—</div>
+        <div class="tree-stat-label">Leaves</div>
+      </div>
+      <div class="tree-stat">
+        <div class="tree-stat-val" id="treeDepth">—</div>
+        <div class="tree-stat-label">Tree Depth</div>
+      </div>
+      <div class="tree-stat">
+        <div class="tree-stat-val" id="treeUtilization">—</div>
+        <div class="tree-stat-label">Utilization</div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-title">Proof Lookup</div>
+      <div class="search-bar">
+        <input type="number" class="search-input" id="proofIndexInput" placeholder="Leaf index..." min="0">
+        <button class="btn" onclick="lookupProof()">Get Proof</button>
+      </div>
+      <div id="proofResult"></div>
+    </div>
+    <div class="card">
+      <div class="card-title">Full Merkle Root</div>
+      <div class="mono" id="fullMerkleRoot" style="word-break:break-all;font-size:12px;color:var(--text-dim)">—</div>
+    </div>
+  </div>
+
+  <!-- ═══ Mempool ═══ -->
+  <div class="view" id="view-mempool">
+    <div class="stat-grid">
+      <div class="stat-card">
+        <div class="stat-label"><span class="stat-icon">&#x23F3;</span> Pending Transactions</div>
+        <div class="stat-value accent" id="mempoolCount">—</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label"><span class="stat-icon">&#x26A1;</span> Actions</div>
+        <div style="margin-top:8px">
+          <button class="btn btn-sm btn-success" onclick="produceBlock()">Produce Block</button>
+        </div>
+        <div class="stat-sub" style="margin-top:6px">Mine pending transactions into a new block</div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-title">Mempool Info</div>
+      <div id="mempoolInfo" style="color:var(--text-dim);font-size:13px">
+        <p>The mempool holds unconfirmed transactions waiting to be included in the next block.</p>
+        <p style="margin-top:8px">In testnet mode, blocks are produced on demand via the
+        <code style="color:var(--accent);background:var(--bg-input);padding:2px 6px;border-radius:4px">produce_block</code>
+        RPC call or the button above.</p>
+      </div>
+      <div id="mempoolProduceResult" style="margin-top:12px"></div>
+    </div>
+  </div>
+
+  <!-- ═══ Faucet ═══ -->
+  <div class="view" id="view-faucet">
+    <div class="card">
+      <div class="card-title">Testnet Faucet</div>
+      <p style="color:var(--text-secondary);margin-bottom:16px;line-height:1.6">
+        Get free testnet tokens (TNKL or sUSDC) to start experimenting with shielded transfers.
+        Tokens have zero real-world value and are for testing only.
+      </p>
+
+      <div style="display:flex;flex-direction:column;gap:20px;">
+        <!-- Step 1 -->
+        <div style="display:flex;gap:12px;align-items:flex-start;">
+          <div style="width:28px;height:28px;border-radius:50%;background:var(--accent);color:#fff;display:flex;align-items:center;justify-content:center;font-weight:700;flex-shrink:0;font-size:14px;">1</div>
+          <div style="flex:1;">
+            <div style="font-weight:600;margin-bottom:4px;">Create a wallet (if you haven't already)</div>
+            <div style="font-family:monospace;background:var(--card-bg);border:1px solid var(--border);border-radius:6px;padding:8px 12px;display:flex;align-items:center;justify-content:space-between;margin-top:8px;">
+              <code style="color:var(--accent)">./tonkl wallet</code>
+              <button onclick="navigator.clipboard.writeText('./tonkl wallet');this.textContent='Copied!';setTimeout(()=>this.textContent='Copy',1500)" style="background:var(--accent);color:#fff;border:none;border-radius:4px;padding:4px 10px;cursor:pointer;font-size:12px;">Copy</button>
+            </div>
+            <div style="color:var(--text-secondary);font-size:12px;margin-top:4px;">The setup wizard runs automatically on first launch. It will generate your seed phrase and first key.</div>
+          </div>
+        </div>
+
+        <!-- Step 2 -->
+        <div style="display:flex;gap:12px;align-items:flex-start;">
+          <div style="width:28px;height:28px;border-radius:50%;background:var(--accent);color:#fff;display:flex;align-items:center;justify-content:center;font-weight:700;flex-shrink:0;font-size:14px;">2</div>
+          <div style="flex:1;">
+            <div style="font-weight:600;margin-bottom:4px;">Request testnet TNKL tokens</div>
+            <div style="font-family:monospace;background:var(--card-bg);border:1px solid var(--border);border-radius:6px;padding:8px 12px;display:flex;align-items:center;justify-content:space-between;margin-top:8px;">
+              <code style="color:var(--accent)">./tonkl wallet faucet</code>
+              <button onclick="navigator.clipboard.writeText('./tonkl wallet faucet');this.textContent='Copied!';setTimeout(()=>this.textContent='Copy',1500)" style="background:var(--accent);color:#fff;border:none;border-radius:4px;padding:4px 10px;cursor:pointer;font-size:12px;">Copy</button>
+            </div>
+            <div style="color:var(--text-secondary);font-size:12px;margin-top:4px;">Drips 100 TNKL to your default key. One request per hour per address.</div>
+          </div>
+        </div>
+
+        <!-- Step 3 -->
+        <div style="display:flex;gap:12px;align-items:flex-start;">
+          <div style="width:28px;height:28px;border-radius:50%;background:var(--accent);color:#fff;display:flex;align-items:center;justify-content:center;font-weight:700;flex-shrink:0;font-size:14px;">3</div>
+          <div style="flex:1;">
+            <div style="font-weight:600;margin-bottom:4px;">Send a shielded transfer</div>
+            <div style="font-family:monospace;background:var(--card-bg);border:1px solid var(--border);border-radius:6px;padding:8px 12px;display:flex;align-items:center;justify-content:space-between;margin-top:8px;">
+              <code style="color:var(--accent)">./tonkl wallet send 50</code>
+              <button onclick="navigator.clipboard.writeText('./tonkl wallet send 50');this.textContent='Copied!';setTimeout(()=>this.textContent='Copy',1500)" style="background:var(--accent);color:#fff;border:none;border-radius:4px;padding:4px 10px;cursor:pointer;font-size:12px;">Copy</button>
+            </div>
+            <div style="color:var(--text-secondary);font-size:12px;margin-top:4px;">Sends 50 TNKL as a zero-knowledge shielded transaction. Balances, amounts, and identities stay hidden on-chain.</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card" style="margin-top:16px;">
+      <div class="card-title">Other Assets</div>
+      <p style="color:var(--text-secondary);margin-bottom:12px;">You can also request sUSDC (Shielded USDC) for multi-asset testing:</p>
+      <div style="font-family:monospace;background:var(--card-bg);border:1px solid var(--border);border-radius:6px;padding:8px 12px;display:flex;align-items:center;justify-content:space-between;">
+        <code style="color:var(--accent)">./tonkl wallet faucet --asset-id 4</code>
+        <button onclick="navigator.clipboard.writeText('./tonkl wallet faucet --asset-id 4');this.textContent='Copied!';setTimeout(()=>this.textContent='Copy',1500)" style="background:var(--accent);color:#fff;border:none;border-radius:4px;padding:4px 10px;cursor:pointer;font-size:12px;">Copy</button>
+      </div>
+    </div>
+
+    <div class="card" style="margin-top:16px;">
+      <div class="card-title">Quick Reference</div>
+      <table style="width:100%;border-collapse:collapse;">
+        <thead>
+          <tr style="border-bottom:1px solid var(--border);">
+            <th style="text-align:left;padding:8px;color:var(--text-secondary);font-size:12px;font-weight:600;">Command</th>
+            <th style="text-align:left;padding:8px;color:var(--text-secondary);font-size:12px;font-weight:600;">Description</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr style="border-bottom:1px solid var(--border);">
+            <td style="padding:8px;"><code style="color:var(--accent)">tonkl wallet balance</code></td>
+            <td style="padding:8px;color:var(--text-secondary)">Check your balances</td>
+          </tr>
+          <tr style="border-bottom:1px solid var(--border);">
+            <td style="padding:8px;"><code style="color:var(--accent)">tonkl wallet notes</code></td>
+            <td style="padding:8px;color:var(--text-secondary)">List your unspent notes</td>
+          </tr>
+          <tr style="border-bottom:1px solid var(--border);">
+            <td style="padding:8px;"><code style="color:var(--accent)">tonkl wallet history</code></td>
+            <td style="padding:8px;color:var(--text-secondary)">View transaction history</td>
+          </tr>
+          <tr style="border-bottom:1px solid var(--border);">
+            <td style="padding:8px;"><code style="color:var(--accent)">tonkl wallet address</code></td>
+            <td style="padding:8px;color:var(--text-secondary)">Show your public address</td>
+          </tr>
+          <tr>
+            <td style="padding:8px;"><code style="color:var(--accent)">tonkl wallet --help</code></td>
+            <td style="padding:8px;color:var(--text-secondary)">All available commands</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- ═══ Network ═══ -->
+  <div class="view" id="view-network">
+    <div class="card">
+      <div class="card-title">Node Information</div>
+      <div class="network-grid" id="networkInfo">
+        <div class="network-item">
+          <div class="network-item-icon">&#x1F4E1;</div>
+          <div class="network-item-info">
+            <div class="network-item-label">Node URL</div>
+            <div class="network-item-value" id="netNodeUrl">—</div>
+          </div>
+        </div>
+        <div class="network-item">
+          <div class="network-item-icon">&#x26D3;</div>
+          <div class="network-item-info">
+            <div class="network-item-label">Chain Height</div>
+            <div class="network-item-value" id="netChainHeight">—</div>
+          </div>
+        </div>
+        <div class="network-item">
+          <div class="network-item-icon">&#x1F552;</div>
+          <div class="network-item-info">
+            <div class="network-item-label">Session Uptime</div>
+            <div class="network-item-value" id="netUptime">—</div>
+          </div>
+        </div>
+        <div class="network-item">
+          <div class="network-item-icon">&#x1F4CA;</div>
+          <div class="network-item-info">
+            <div class="network-item-label">Total Transactions</div>
+            <div class="network-item-value" id="netTotalTx">—</div>
+          </div>
+        </div>
+        <div class="network-item">
+          <div class="network-item-icon">&#x1F512;</div>
+          <div class="network-item-info">
+            <div class="network-item-label">Nullifiers Spent</div>
+            <div class="network-item-value" id="netNullifiers">—</div>
+          </div>
+        </div>
+        <div class="network-item">
+          <div class="network-item-icon">&#x1F333;</div>
+          <div class="network-item-info">
+            <div class="network-item-label">Tree Size</div>
+            <div class="network-item-value" id="netTreeSize">—</div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-title">Protocol</div>
+      <div class="network-grid">
+        <div class="network-item">
+          <div class="network-item-icon">&#x1F510;</div>
+          <div class="network-item-info">
+            <div class="network-item-label">Proving System</div>
+            <div class="network-item-value">UltraHonk</div>
+          </div>
+        </div>
+        <div class="network-item">
+          <div class="network-item-icon">#</div>
+          <div class="network-item-info">
+            <div class="network-item-label">Hash Function</div>
+            <div class="network-item-value">Poseidon2</div>
+          </div>
+        </div>
+        <div class="network-item">
+          <div class="network-item-icon">&#x1F4D0;</div>
+          <div class="network-item-info">
+            <div class="network-item-label">Curve</div>
+            <div class="network-item-value">BN254</div>
+          </div>
+        </div>
+        <div class="network-item">
+          <div class="network-item-icon">&#x1F332;</div>
+          <div class="network-item-info">
+            <div class="network-item-label">Merkle Depth</div>
+            <div class="network-item-value">32</div>
+          </div>
+        </div>
+        <div class="network-item">
+          <div class="network-item-icon">&#x1F4E6;</div>
+          <div class="network-item-info">
+            <div class="network-item-label">Circuit Types</div>
+            <div class="network-item-value">4</div>
+          </div>
+        </div>
+        <div class="network-item">
+          <div class="network-item-icon">&#x1F3F7;</div>
+          <div class="network-item-info">
+            <div class="network-item-label">Version</div>
+            <div class="network-item-value">v0.1.0-beta</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ─── Script ─── -->
+<script>
+// ══════════════���════════════════════════════════════════════════════
+// Tonkl Block Explorer — Client Logic (v2)
+// ══════════════════════════════��════════════════════════════════════
+
+const BLOCKS_PER_PAGE = 20;
+const REFRESH_INTERVAL = 4000;
+const MAX_RECENT_BLOCKS = 8;
+const MAX_ACTIVITY_ITEMS = 20;
+const TREE_MAX_LEAVES = Math.pow(2, 32);  // depth-32 tree
+
+let state = {
+  nodeUrl: 'http://127.0.0.1:9100',
+  connected: false,
+  status: null,
+  prevStatus: null,
+  blocks: {},
+  currentView: 'overview',
+  blocksPage: 0,
+  autoRefresh: true,
+  refreshTimer: null,
+  activityLog: [],
+  lastHeight: -1,
+  sessionStart: Date.now(),
+  totalTxCount: 0,
+  txTypeCounts: { mint: 0, transfer: 0, split: 0, merge: 0 },
+  blockTimes: [],
+  theme: localStorage.getItem('obscura-theme') || 'dark',
+};
+
+// ─── Theme ───
+
+function applyTheme() {
+  if (state.theme === 'light') {
+    document.documentElement.setAttribute('data-theme', 'light');
+    document.getElementById('themeToggle').innerHTML = '&#9728;';
+  } else {
+    document.documentElement.removeAttribute('data-theme');
+    document.getElementById('themeToggle').innerHTML = '&#9790;';
+  }
+}
+
+document.getElementById('themeToggle').addEventListener('click', () => {
+  state.theme = state.theme === 'dark' ? 'light' : 'dark';
+  localStorage.setItem('obscura-theme', state.theme);
+  applyTheme();
+});
+
+applyTheme();
+
+// ─── JSON-RPC ───
+
+async function rpc(method, params = []) {
+  const resp = await fetch(state.nodeUrl, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ jsonrpc: '2.0', method, params, id: Date.now() }),
+  });
+  const body = await resp.json();
+  if (body.error) throw new Error(body.error.message || 'RPC error');
+  return body.result;
+}
+
+async function getStatus() { return await rpc('get_status'); }
+async function getBlock(num) {
+  if (state.blocks[num]) return state.blocks[num];
+  const b = await rpc('get_block', [num]);
+  if (b) state.blocks[num] = b;
+  return b;
+}
+async function getTxStatus(hash) { return await rpc('get_tx_status', [hash]); }
+async function getNullifierStatus(hash) { return await rpc('get_nullifier_status', [hash]); }
+async function getMerkleProof(index) { return await rpc('get_merkle_proof', [index]); }
+
+// ─── Formatting Helpers ───
+
+function truncHash(h, len = 16) {
+  if (!h) return '—';
+  const s = typeof h === 'string' ? h : '0x' + Array.from(h).map(b => b.toString(16).padStart(2,'0')).join('');
+  if (s.length <= len + 4) return s;
+  return s.slice(0, len + 2) + '...' + s.slice(-4);
+}
+
+function fullHash(h) {
+  if (!h) return '—';
+  if (typeof h === 'string') return h;
+  return '0x' + Array.from(h).map(b => b.toString(16).padStart(2,'0')).join('');
+}
+
+function fmtTime(ts) {
+  if (!ts) return '—';
+  const d = new Date(ts * 1000);
+  return d.toLocaleString();
+}
+
+function fmtTimeAgo(ts) {
+  if (!ts) return '—';
+  const now = Date.now() / 1000;
+  const diff = now - ts;
+  if (diff < 60) return Math.round(diff) + 's ago';
+  if (diff < 3600) return Math.round(diff / 60) + 'm ago';
+  if (diff < 86400) return Math.round(diff / 3600) + 'h ago';
+  return Math.round(diff / 86400) + 'd ago';
+}
+
+function fmtNumber(n) {
+  if (n == null) return '—';
+  return n.toLocaleString();
+}
+
+function fmtDuration(ms) {
+  const s = Math.floor(ms / 1000);
+  const m = Math.floor(s / 60);
+  const h = Math.floor(m / 60);
+  if (h > 0) return `${h}h ${m % 60}m`;
+  if (m > 0) return `${m}m ${s % 60}s`;
+  return `${s}s`;
+}
+
+function txBadgeClass(type) {
+  const m = { mint: 'badge-mint', transfer: 'badge-transfer', split: 'badge-split', merge: 'badge-merge' };
+  return m[type] || 'badge-unknown';
+}
+
+// ─── Global Search ───
+
+document.getElementById('globalSearch').addEventListener('keydown', (e) => {
+  if (e.key !== 'Enter') return;
+  const val = e.target.value.trim();
+  if (!val) return;
+
+  if (/^\d+$/.test(val)) {
+    // Block number
+    document.getElementById('blockNumInput').value = val;
+    switchView('block-detail');
+    lookupBlock();
+  } else if (val.startsWith('0x') && val.length > 20) {
+    // Could be tx hash or nullifier — try tx first
+    document.getElementById('txHashInput').value = val;
+    switchView('tx-lookup');
+    lookupTx();
+  } else {
+    // Try as nullifier
+    document.getElementById('nullifierInput').value = val;
+    switchView('nullifiers');
+    lookupNullifier();
+  }
+  e.target.value = '';
+  e.target.blur();
+});
+
+// ��── Tab Switching ───
+
+document.getElementById('tabs').addEventListener('click', (e) => {
+  if (!e.target.classList.contains('tab')) return;
+  switchView(e.target.dataset.view);
+});
+
+function switchView(view) {
+  state.currentView = view;
+  document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.view === view));
+  document.querySelectorAll('.view').forEach(v => v.classList.toggle('active', v.id === `view-${view}`));
+  refresh();
+}
+
+// ─── Node URL ───
+
+document.getElementById('nodeUrl').addEventListener('change', (e) => {
+  state.nodeUrl = e.target.value.trim();
+  state.blocks = {};
+  state.lastHeight = -1;
+  state.activityLog = [];
+  state.totalTxCount = 0;
+  state.txTypeCounts = { mint: 0, transfer: 0, split: 0, merge: 0 };
+  state.blockTimes = [];
+  refresh();
+});
+
+// ─── Auto Refresh ───
+
+document.getElementById('autoRefresh').addEventListener('change', (e) => {
+  state.autoRefresh = e.target.checked;
+  if (state.autoRefresh) startAutoRefresh();
+  else stopAutoRefresh();
+});
+
+function startAutoRefresh() {
+  stopAutoRefresh();
+  state.refreshTimer = setInterval(() => refresh(), REFRESH_INTERVAL);
+}
+
+function stopAutoRefresh() {
+  if (state.refreshTimer) {
+    clearInterval(state.refreshTimer);
+    state.refreshTimer = null;
+  }
+}
+
+// ─── Activity Feed ───
+
+function addActivity(type, title, sub, ts) {
+  state.activityLog.unshift({ type, title, sub, ts: ts || Date.now() / 1000 });
+  if (state.activityLog.length > MAX_ACTIVITY_ITEMS) state.activityLog.pop();
+}
+
+function renderActivityFeed() {
+  const feed = document.getElementById('activityFeed');
+  const empty = document.getElementById('activityEmpty');
+
+  if (state.activityLog.length === 0) {
+    empty.style.display = 'block';
+    return;
+  }
+  empty.style.display = 'none';
+
+  feed.innerHTML = state.activityLog.map(a => `
+    <div class="activity-item">
+      <div class="activity-icon ${a.type}">
+        ${a.type === 'block' ? '&#x25A3;' : '&#x21C4;'}
+      </div>
+      <div class="activity-info">
+        <div class="activity-title">${a.title}</div>
+        <div class="activity-sub">${a.sub}</div>
+      </div>
+      <div class="activity-time">${fmtTimeAgo(a.ts)}</div>
+    </div>
+  `).join('');
+}
+
+// ─── Chain Stats ───
+
+async function computeChainStats() {
+  const s = state.status;
+  if (!s || s.block_height < 1) return;
+
+  // Scan recent blocks to accumulate stats
+  const scanStart = Math.max(1, s.block_height - 50);
+  let prevTs = null;
+  let txTypes = { mint: 0, transfer: 0, split: 0, merge: 0 };
+  let totalTx = 0;
+  let times = [];
+
+  for (let i = scanStart; i <= s.block_height; i++) {
+    try {
+      const b = await getBlock(i);
+      if (!b) continue;
+      const h = b.header;
+
+      if (prevTs !== null && h.timestamp > prevTs) {
+        times.push(h.timestamp - prevTs);
+      }
+      prevTs = h.timestamp;
+
+      const txs = b.transactions || [];
+      totalTx += txs.length;
+      for (const tx of txs) {
+        if (tx.tx_type && txTypes.hasOwnProperty(tx.tx_type)) {
+          txTypes[tx.tx_type]++;
+        }
+      }
+    } catch(e) { /* skip */ }
+  }
+
+  state.totalTxCount = totalTx;
+  state.txTypeCounts = txTypes;
+  state.blockTimes = times;
+}
+
+function renderChainStats() {
+  const container = document.getElementById('chainStatsContent');
+  const s = state.status;
+  if (!s || s.block_height < 1) {
+    container.innerHTML = '<div class="empty-state">No blocks produced yet</div>';
+    return;
+  }
+
+  const avgTime = state.blockTimes.length > 0
+    ? (state.blockTimes.reduce((a,b) => a+b, 0) / state.blockTimes.length).toFixed(1)
+    : '—';
+
+  const total = state.totalTxCount || 1;
+  const types = state.txTypeCounts;
+
+  // Update overview sub-stats
+  document.getElementById('statBlockTime').textContent =
+    avgTime !== '—' ? `~${avgTime}s avg block time` : '';
+
+  let html = `
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:12px;margin-bottom:16px">
+      <div class="tree-stat">
+        <div class="tree-stat-val">${fmtNumber(state.totalTxCount)}</div>
+        <div class="tree-stat-label">Total Transactions</div>
+      </div>
+      <div class="tree-stat">
+        <div class="tree-stat-val">${avgTime}s</div>
+        <div class="tree-stat-label">Avg Block Time</div>
+      </div>
+      <div class="tree-stat">
+        <div class="tree-stat-val">${state.blockTimes.length > 0 ? (state.totalTxCount / (state.blockTimes.length || 1)).toFixed(1) : '—'}</div>
+        <div class="tree-stat-label">Avg TXs/Block</div>
+      </div>
+      <div class="tree-stat">
+        <div class="tree-stat-val">${s.block_height}</div>
+        <div class="tree-stat-label">Blocks Scanned</div>
+      </div>
+    </div>`;
+
+  // Type breakdown bar
+  if (state.totalTxCount > 0) {
+    html += `
+      <div style="font-size:12px;color:var(--text-muted);margin-bottom:4px;text-transform:uppercase;letter-spacing:0.05em">Transaction Types</div>
+      <div class="type-bar">
+        <div class="type-bar-seg mint" style="width:${(types.mint/total*100)}%"></div>
+        <div class="type-bar-seg transfer" style="width:${(types.transfer/total*100)}%"></div>
+        <div class="type-bar-seg split" style="width:${(types.split/total*100)}%"></div>
+        <div class="type-bar-seg merge" style="width:${(types.merge/total*100)}%"></div>
+      </div>
+      <div class="type-legend">
+        <div class="type-legend-item"><div class="type-legend-dot" style="background:var(--green)"></div> Mint (${types.mint})</div>
+        <div class="type-legend-item"><div class="type-legend-dot" style="background:var(--accent)"></div> Transfer (${types.transfer})</div>
+        <div class="type-legend-item"><div class="type-legend-dot" style="background:var(--yellow)"></div> Split (${types.split})</div>
+        <div class="type-legend-item"><div class="type-legend-dot" style="background:var(--cyan)"></div> Merge (${types.merge})</div>
+      </div>`;
+  }
+
+  container.innerHTML = html;
+}
+
+// ─── Main Refresh ───
+
+async function refresh() {
+  try {
+    state.prevStatus = state.status;
+    state.status = await getStatus();
+    state.connected = true;
+    setConnectionStatus(true);
+    hideError();
+  } catch (e) {
+    state.connected = false;
+    setConnectionStatus(false);
+    showError('Cannot connect to node at ' + state.nodeUrl);
+    return;
+  }
+
+  // Detect new blocks for activity feed
+  const s = state.status;
+  if (s.block_height > state.lastHeight && state.lastHeight >= 0) {
+    for (let i = state.lastHeight + 1; i <= s.block_height; i++) {
+      try {
+        const b = await getBlock(i);
+        if (!b) continue;
+        const txCount = (b.transactions || []).length;
+        addActivity('block', `Block #${i}`, `${txCount} transaction${txCount !== 1 ? 's' : ''} — ${truncHash(b.header.state_root, 12)}`, b.header.timestamp);
+        for (const tx of (b.transactions || [])) {
+          addActivity('tx', `${tx.tx_type} TX`, truncHash(fullHash(tx.tx_hash), 20), b.header.timestamp);
+        }
+      } catch(e) { /* skip */ }
+    }
+  }
+  state.lastHeight = s.block_height;
+
+  // Update mempool badge
+  const mempoolTab = document.querySelector('[data-view="mempool"]');
+  if (s.mempool_size > 0) {
+    let badge = mempoolTab.querySelector('.tab-badge');
+    if (!badge) {
+      badge = document.createElement('span');
+      badge.className = 'tab-badge';
+      mempoolTab.appendChild(badge);
+    }
+    badge.textContent = s.mempool_size;
+  } else {
+    const badge = mempoolTab.querySelector('.tab-badge');
+    if (badge) badge.remove();
+  }
+
+  const v = state.currentView;
+  if (v === 'overview') { await renderOverview(); }
+  else if (v === 'blocks') renderBlocksList();
+  else if (v === 'merkle') renderMerkle();
+  else if (v === 'mempool') renderMempool();
+  else if (v === 'network') renderNetwork();
+}
+
+function setConnectionStatus(ok) {
+  const pill = document.getElementById('statusPill');
+  const label = document.getElementById('statusLabel');
+  pill.className = 'status-pill ' + (ok ? 'connected' : 'error');
+  pill.title = ok ? 'Connected' : 'Disconnected';
+  label.textContent = ok ? 'Connected' : 'Offline';
+}
+
+function showError(msg) {
+  const el = document.getElementById('errorBanner');
+  document.getElementById('errorText').textContent = msg;
+  el.style.display = 'flex';
+}
+
+function hideError() {
+  document.getElementById('errorBanner').style.display = 'none';
+}
+
+// ─── Overview ───
+
+async function renderOverview() {
+  const s = state.status;
+  if (!s) return;
+
+  document.getElementById('statHeight').textContent = fmtNumber(s.block_height);
+  document.getElementById('statLeaves').textContent = fmtNumber(s.leaf_count);
+  document.getElementById('statNullifiers').textContent = fmtNumber(s.nullifier_count);
+  document.getElementById('statMempool').textContent = fmtNumber(s.mempool_size);
+  document.getElementById('statMerkleRoot').textContent = s.merkle_root || '—';
+
+  if (s.mempool_size > 0) {
+    document.getElementById('statMempoolHint').textContent = 'pending — ready to mine';
+  } else {
+    document.getElementById('statMempoolHint').textContent = '';
+  }
+
+  if (s.leaf_count > 0) {
+    document.getElementById('statLeafRate').textContent =
+      `${((s.leaf_count / TREE_MAX_LEAVES) * 100).toFixed(6)}% of capacity`;
+  }
+
+  // Recent blocks
+  const tbody = document.getElementById('recentBlocksBody');
+  const empty = document.getElementById('recentBlocksEmpty');
+
+  if (s.block_height === 0) {
+    tbody.innerHTML = '';
+    empty.style.display = 'block';
+    document.getElementById('recentBlockCount').textContent = '0';
+  } else {
+    empty.style.display = 'none';
+    document.getElementById('recentBlockCount').textContent = Math.min(s.block_height, MAX_RECENT_BLOCKS);
+
+    const start = Math.max(0, s.block_height - MAX_RECENT_BLOCKS);
+    const rows = [];
+    for (let i = s.block_height; i > start; i--) {
+      try {
+        const b = await getBlock(i);
+        if (!b) continue;
+        const h = b.header;
+        rows.push(`<tr>
+          <td><a class="hash" onclick="viewBlock(${h.block_number})">${h.block_number}</a></td>
+          <td class="mono">${truncHash(h.state_root, 20)}</td>
+          <td>${h.tx_count}</td>
+          <td class="mono" style="color:var(--text-dim);font-size:11px">${fmtTimeAgo(h.timestamp)}</td>
+        </tr>`);
+      } catch(e) { /* skip */ }
+    }
+    tbody.innerHTML = rows.join('');
+  }
+
+  renderActivityFeed();
+  await computeChainStats();
+  renderChainStats();
+}
+
+// ─── Blocks List ───
+
+async function renderBlocksList() {
+  const s = state.status;
+  if (!s) return;
+
+  const tbody = document.getElementById('allBlocksBody');
+  const empty = document.getElementById('allBlocksEmpty');
+  document.getElementById('totalBlockCount').textContent = s.block_height;
+
+  if (s.block_height === 0) {
+    tbody.innerHTML = '';
+    empty.style.display = 'block';
+    updateBlocksPaging();
+    return;
+  }
+  empty.style.display = 'none';
+
+  const totalPages = Math.ceil(s.block_height / BLOCKS_PER_PAGE);
+  if (state.blocksPage >= totalPages) state.blocksPage = totalPages - 1;
+
+  const topBlock = s.block_height - (state.blocksPage * BLOCKS_PER_PAGE);
+  const bottomBlock = Math.max(1, topBlock - BLOCKS_PER_PAGE + 1);
+
+  const rows = [];
+  for (let i = topBlock; i >= bottomBlock; i--) {
+    try {
+      const b = await getBlock(i);
+      if (!b) continue;
+      const h = b.header;
+      const txs = b.transactions || [];
+      const nullCount = txs.reduce((acc, tx) => acc + (tx.nullifiers || []).length, 0);
+      rows.push(`<tr>
+        <td><a class="hash" onclick="viewBlock(${h.block_number})">${h.block_number}</a></td>
+        <td class="mono">${truncHash(h.state_root, 24)}</td>
+        <td>${h.tx_count}</td>
+        <td class="mono">${nullCount}</td>
+        <td class="mono" style="color:var(--text-dim)">${fmtTime(h.timestamp)}</td>
+      </tr>`);
+    } catch(e) { /* skip */ }
+  }
+  tbody.innerHTML = rows.join('');
+  updateBlocksPaging();
+}
+
+function updateBlocksPaging() {
+  const s = state.status;
+  const total = s ? s.block_height : 0;
+  const totalPages = Math.max(1, Math.ceil(total / BLOCKS_PER_PAGE));
+
+  document.getElementById('blocksPageInfo').textContent =
+    `Page ${state.blocksPage + 1} of ${totalPages}`;
+  document.getElementById('blocksPrev').disabled = state.blocksPage === 0;
+  document.getElementById('blocksNext').disabled = state.blocksPage >= totalPages - 1;
+}
+
+document.getElementById('blocksPrev').addEventListener('click', () => {
+  if (state.blocksPage > 0) { state.blocksPage--; renderBlocksList(); }
+});
+document.getElementById('blocksNext').addEventListener('click', () => {
+  state.blocksPage++;
+  renderBlocksList();
+});
+
+// ─── Block Detail ───
+
+function viewBlock(num) {
+  document.getElementById('blockNumInput').value = num;
+  switchView('block-detail');
+  lookupBlock();
+}
+
+async function lookupBlock() {
+  const num = parseInt(document.getElementById('blockNumInput').value, 10);
+  const container = document.getElementById('blockDetailContent');
+
+  if (isNaN(num) || num < 0) {
+    container.innerHTML = '<div class="empty-state">Enter a valid block number</div>';
+    return;
+  }
+
+  try {
+    const b = await getBlock(num);
+    if (!b) {
+      container.innerHTML = `<div class="empty-state">Block ${num} not found</div>`;
+      return;
+    }
+
+    const h = b.header;
+    const parentHash = fullHash(h.parent_hash);
+    const maxHeight = state.status ? state.status.block_height : num;
+
+    // Navigation
+    let html = `
+      <div class="block-nav">
+        <button class="block-nav-btn" onclick="viewBlock(${num - 1})" ${num <= 0 ? 'disabled' : ''}>
+          &#x25C0; Block ${num - 1}
+        </button>
+        <div class="block-nav-title">Block #${num}</div>
+        <button class="block-nav-btn" onclick="viewBlock(${num + 1})" ${num >= maxHeight ? 'disabled' : ''}>
+          Block ${num + 1} &#x25B6;
+        </button>
+      </div>
+      <div class="card">
+        <div class="card-title">Block Header</div>
+        <div class="detail-grid">
+          <div class="detail-label">Block Number</div>
+          <div class="detail-value">${h.block_number}</div>
+          <div class="detail-label">State Root</div>
+          <div class="detail-value" style="color:var(--accent)">${h.state_root || '—'}</div>
+          <div class="detail-label">Parent Hash</div>
+          <div class="detail-value">${parentHash}</div>
+          <div class="detail-label">Timestamp</div>
+          <div class="detail-value">${fmtTime(h.timestamp)} <span style="color:var(--text-muted);font-size:11px">(${fmtTimeAgo(h.timestamp)})</span></div>
+          <div class="detail-label">Transactions</div>
+          <div class="detail-value">${h.tx_count}</div>
+        </div>
+      </div>`;
+
+    const txs = b.transactions || [];
+    if (txs.length > 0) {
+      html += `<div class="card"><div class="card-title">Transactions <span class="count">${txs.length}</span></div>`;
+      for (let ti = 0; ti < txs.length; ti++) {
+        const tx = txs[ti];
+        const txHash = fullHash(tx.tx_hash);
+        const commitments = tx.new_commitments || [];
+        const nullifiers = tx.nullifiers || [];
+
+        html += `
+          <div style="border:1px solid var(--border);border-radius:var(--radius);padding:14px;margin-bottom:8px;background:var(--bg)">
+            <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
+              <div>
+                <span class="badge ${txBadgeClass(tx.tx_type)}">${tx.tx_type}</span>
+                <span class="mono hash" onclick="viewTx('${txHash}')" style="margin-left:8px;font-size:11px">${truncHash(txHash, 24)}</span>
+              </div>
+              <span class="mono" style="font-size:11px;color:var(--text-muted)">Fee: ${tx.fee != null ? tx.fee : '—'}</span>
+            </div>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;font-size:12px">
+              <div>
+                <div style="color:var(--text-muted);margin-bottom:4px">${commitments.length} Commitment${commitments.length !== 1 ? 's' : ''}</div>
+                ${commitments.slice(0, 3).map(c => `<div class="mono" style="font-size:10px;color:var(--green)">${truncHash(c, 28)}</div>`).join('')}
+                ${commitments.length > 3 ? `<div style="font-size:10px;color:var(--text-muted)">+${commitments.length - 3} more</div>` : ''}
+              </div>
+              <div>
+                <div style="color:var(--text-muted);margin-bottom:4px">${nullifiers.length} Nullifier${nullifiers.length !== 1 ? 's' : ''}</div>
+                ${nullifiers.slice(0, 3).map(n => `<div class="mono" style="font-size:10px;color:var(--red)">${truncHash(n, 28)}</div>`).join('')}
+                ${nullifiers.length > 3 ? `<div style="font-size:10px;color:var(--text-muted)">+${nullifiers.length - 3} more</div>` : ''}
+              </div>
+            </div>
+          </div>`;
+      }
+      html += '</div>';
+    }
+
+    container.innerHTML = html;
+  } catch (e) {
+    container.innerHTML = `<div class="error-state"><span>&#x26A0;</span> <span>${e.message}</span></div>`;
+  }
+}
+
+// ─── TX Lookup ───
+
+function viewTx(hash) {
+  document.getElementById('txHashInput').value = hash;
+  switchView('tx-lookup');
+  lookupTx();
+}
+
+async function lookupTx() {
+  const hash = document.getElementById('txHashInput').value.trim();
+  const container = document.getElementById('txDetailContent');
+
+  if (!hash) {
+    container.innerHTML = '<div class="empty-state">Enter a transaction hash</div>';
+    return;
+  }
+
+  try {
+    const r = await getTxStatus(hash);
+
+    const statusBadge = r.status === 'confirmed' ? 'badge-confirmed'
+      : r.status === 'pending' ? 'badge-pending' : 'badge-unknown';
+
+    let html = `
+      <div class="card">
+        <div class="card-title">Transaction Details</div>
+        <div class="detail-grid">
+          <div class="detail-label">Hash</div>
+          <div class="detail-value" style="color:var(--accent)">${hash}</div>
+          <div class="detail-label">Status</div>
+          <div class="detail-value"><span class="badge ${statusBadge}">${r.status}</span></div>`;
+
+    if (r.tx_type) {
+      html += `
+          <div class="detail-label">Type</div>
+          <div class="detail-value"><span class="badge ${txBadgeClass(r.tx_type)}">${r.tx_type}</span></div>`;
+    }
+    if (r.block_number != null) {
+      html += `
+          <div class="detail-label">Block</div>
+          <div class="detail-value"><a class="hash" onclick="viewBlock(${r.block_number})">#${r.block_number}</a></div>`;
+    }
+    if (r.confirmations != null) {
+      html += `
+          <div class="detail-label">Confirmations</div>
+          <div class="detail-value">${r.confirmations}</div>`;
+    }
+
+    html += '</div></div>';
+
+    // If confirmed and in a block, try to show TX details from the block
+    if (r.block_number != null) {
+      try {
+        const b = await getBlock(r.block_number);
+        if (b) {
+          const tx = (b.transactions || []).find(t => fullHash(t.tx_hash) === hash);
+          if (tx) {
+            const commitments = tx.new_commitments || [];
+            const nullifiers = tx.nullifiers || [];
+
+            html += `<div class="card"><div class="card-title">Transaction Data</div>`;
+            html += `<div class="detail-grid">
+              <div class="detail-label">Fee</div>
+              <div class="detail-value">${tx.fee != null ? tx.fee : '—'}</div>
+              <div class="detail-label">Commitments</div>
+              <div class="detail-value">${commitments.length}</div>
+              <div class="detail-label">Nullifiers</div>
+              <div class="detail-value">${nullifiers.length}</div>
+            </div>`;
+
+            if (commitments.length > 0) {
+              html += `<div style="margin-top:12px"><div class="card-title">New Commitments</div>`;
+              for (const c of commitments) {
+                html += `<div class="mono" style="font-size:11px;padding:4px 0;color:var(--green);word-break:break-all">${fullHash(c)}</div>`;
+              }
+              html += '</div>';
+            }
+
+            if (nullifiers.length > 0) {
+              html += `<div style="margin-top:12px"><div class="card-title">Nullifiers Revealed</div>`;
+              for (const n of nullifiers) {
+                html += `<div class="mono" style="font-size:11px;padding:4px 0;color:var(--red);word-break:break-all">${fullHash(n)}</div>`;
+              }
+              html += '</div>';
+            }
+
+            html += '</div>';
+          }
+        }
+      } catch(e) { /* skip enrichment */ }
+    }
+
+    container.innerHTML = html;
+  } catch (e) {
+    container.innerHTML = `<div class="error-state"><span>&#x26A0;</span> <span>${e.message}</span></div>`;
+  }
+}
+
+// ─── Nullifier Lookup ───
+
+async function lookupNullifier() {
+  const hash = document.getElementById('nullifierInput').value.trim();
+  const container = document.getElementById('nullifierResult');
+
+  if (!hash) {
+    container.innerHTML = '<div class="empty-state">Enter a nullifier hash</div>';
+    return;
+  }
+
+  try {
+    const spent = await getNullifierStatus(hash);
+    const badge = spent ? 'badge-spent' : 'badge-unspent';
+    const label = spent ? 'SPENT' : 'UNSPENT';
+    const icon = spent ? '&#x26D4;' : '&#x2705;';
+
+    container.innerHTML = `
+      <div class="card">
+        <div class="detail-grid">
+          <div class="detail-label">Nullifier</div>
+          <div class="detail-value" style="color:var(--accent)">${hash}</div>
+          <div class="detail-label">Status</div>
+          <div class="detail-value"><span class="badge ${badge}">${icon} ${label}</span></div>
+        </div>
+        <div style="margin-top:12px;font-size:12px;color:var(--text-muted)">
+          ${spent
+            ? 'This nullifier has been revealed, meaning the corresponding note has been spent.'
+            : 'This nullifier has not been seen. The corresponding note (if it exists) is unspent.'}
+        </div>
+      </div>`;
+  } catch (e) {
+    container.innerHTML = `<div class="error-state"><span>&#x26A0;</span> <span>${e.message}</span></div>`;
+  }
+}
+
+// ─── Merkle Tree ───
+
+function renderMerkle() {
+  const s = state.status;
+  if (!s) return;
+
+  const rootStr = s.merkle_root || '—';
+  document.getElementById('treeRoot').textContent = rootStr.length > 18 ? rootStr.slice(0, 18) + '...' : rootStr;
+  document.getElementById('treeLeaves').textContent = fmtNumber(s.leaf_count);
+  document.getElementById('fullMerkleRoot').textContent = rootStr;
+
+  if (s.leaf_count > 0) {
+    const effectiveDepth = Math.max(1, Math.ceil(Math.log2(s.leaf_count || 1)));
+    document.getElementById('treeDepth').textContent = `${effectiveDepth} / 32`;
+    const utilPct = ((s.leaf_count / TREE_MAX_LEAVES) * 100);
+    document.getElementById('treeUtilization').textContent =
+      utilPct < 0.001 ? '<0.001%' : utilPct.toFixed(4) + '%';
+  } else {
+    document.getElementById('treeDepth').textContent = '0 / 32';
+    document.getElementById('treeUtilization').textContent = '0%';
+  }
+}
+
+async function lookupProof() {
+  const idx = parseInt(document.getElementById('proofIndexInput').value, 10);
+  const container = document.getElementById('proofResult');
+
+  if (isNaN(idx) || idx < 0) {
+    container.innerHTML = '<div class="empty-state">Enter a valid leaf index</div>';
+    return;
+  }
+
+  try {
+    const p = await getMerkleProof(idx);
+
+    let html = `
+      <div style="margin-top:16px">
+        <div class="detail-grid">
+          <div class="detail-label">Leaf Index</div>
+          <div class="detail-value">${p.index}</div>
+          <div class="detail-label">Path Length</div>
+          <div class="detail-value">${p.siblings.length} levels</div>
+          <div class="detail-label">Index Bits</div>
+          <div class="detail-value" style="font-size:11px">[${p.index_bits.slice(0, 8).map(b => b ? '1' : '0').join(', ')}${p.index_bits.length > 8 ? ', ...' : ''}]</div>
+        </div>
+        <div style="margin-top:12px">
+          <div class="card-title">Sibling Hashes <span class="count">${p.siblings.length}</span></div>
+          <div style="max-height:300px;overflow-y:auto">`;
+
+    for (let i = 0; i < p.siblings.length; i++) {
+      const isZero = p.siblings[i] === '0x0' || p.siblings[i] === '0' || p.siblings[i] === 0;
+      html += `<div style="padding:4px 0;font-size:11px;font-family:var(--mono);color:${isZero ? 'var(--text-muted)' : 'var(--text-dim)'}">
+        <span style="color:var(--accent);width:40px;display:inline-block">L${i}</span>
+        ${truncHash(p.siblings[i], 48)}
+        ${isZero ? '<span style="color:var(--text-muted);font-size:10px"> (empty)</span>' : ''}
+      </div>`;
+    }
+
+    html += '</div></div></div>';
+    container.innerHTML = html;
+  } catch (e) {
+    container.innerHTML = `<div class="error-state"><span>&#x26A0;</span> <span>${e.message}</span></div>`;
+  }
+}
+
+// ─── Mempool ───
+
+function renderMempool() {
+  const s = state.status;
+  if (!s) return;
+  document.getElementById('mempoolCount').textContent = fmtNumber(s.mempool_size);
+}
+
+async function produceBlock() {
+  const container = document.getElementById('mempoolProduceResult');
+  try {
+    container.innerHTML = '<div style="color:var(--text-dim);font-size:13px">Mining block...</div>';
+    const result = await rpc('produce_block');
+    container.innerHTML = `
+      <div style="background:var(--green-dim);border:1px solid rgba(34,197,94,0.3);border-radius:var(--radius);padding:12px 16px;color:var(--green);font-size:13px">
+        &#x2705; Block produced successfully!
+        ${result && result.block_number ? ` <a class="hash" onclick="viewBlock(${result.block_number})">View Block #${result.block_number}</a>` : ''}
+      </div>`;
+    // Refresh after a short delay
+    setTimeout(() => refresh(), 500);
+  } catch (e) {
+    container.innerHTML = `<div class="error-state"><span>&#x26A0;</span> <span>${e.message}</span></div>`;
+  }
+}
+
+// ─── Network ───
+
+function renderNetwork() {
+  const s = state.status;
+  if (!s) return;
+
+  document.getElementById('netNodeUrl').textContent = state.nodeUrl;
+  document.getElementById('netChainHeight').textContent = fmtNumber(s.block_height);
+  document.getElementById('netUptime').textContent = fmtDuration(Date.now() - state.sessionStart);
+  document.getElementById('netTotalTx').textContent = fmtNumber(state.totalTxCount);
+  document.getElementById('netNullifiers').textContent = fmtNumber(s.nullifier_count);
+  document.getElementById('netTreeSize').textContent = `${fmtNumber(s.leaf_count)} / ${fmtNumber(TREE_MAX_LEAVES)}`;
+}
+
+// ─── Keyboard shortcuts ───
+
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') {
+    const id = e.target.id;
+    if (id === 'blockNumInput') lookupBlock();
+    else if (id === 'txHashInput') lookupTx();
+    else if (id === 'nullifierInput') lookupNullifier();
+    else if (id === 'proofIndexInput') lookupProof();
+  }
+
+  // Ctrl/Cmd + K for search
+  if ((e.ctrlKey || e.metaKey) && e.key === 'k') {
+    e.preventDefault();
+    document.getElementById('globalSearch').focus();
+  }
+});
+
+// ─── Init ───
+
+(async function init() {
+  await refresh();
+  startAutoRefresh();
+})();
+</script>
+</body>
+</html>

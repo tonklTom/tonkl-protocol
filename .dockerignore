@@ -1,0 +1,22 @@
+# Tonkl Docker build — exclude non-essential files
+.git/
+*.md
+*.docx
+probe/
+probe-grumpkin/
+obscura-website/
+obscura-hasher/
+obscura-tree/
+obscura-lib/
+node_modules/
+.env
+.env.*
+docker-compose.yml
+
+# Exclude Rust build artifacts (the builder stage compiles from source)
+# but keep circuit target/ dirs for VK files used by the runtime stage
+**/target/release/
+**/target/debug/
+**/target/.rustc_info.json
+**/target/.cargo-lock
+**/target/CACHEDIR.TAG

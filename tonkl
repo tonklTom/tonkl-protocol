@@ -1,0 +1,339 @@
+#!/usr/bin/env bash
+# ───────────────────────────────────────────────────────────────────
+# tonkl — One-command entry point for the Tonkl privacy protocol
+#
+# Usage:
+#   ./tonkl testnet start          Start a local 3-node testnet
+#   ./tonkl testnet start -n 1     Single node for quick testing
+#   ./tonkl wallet                 Launch the wallet CLI
+#   ./tonkl wallet balance         Check balance
+#   ./tonkl wallet faucet          Request testnet tokens
+#   ./tonkl node status            Query node status
+#   ./tonkl build                  Build everything from source
+#   ./tonkl doctor                 Check prerequisites
+# ───────────────────────────────────────────────────────────────────
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+NODE_DIR="$SCRIPT_DIR/obscura-node"
+PROVER_DIR="$SCRIPT_DIR/obscura-prover"
+SCRIPTS_DIR="$NODE_DIR/scripts"
+NODE_BIN="$NODE_DIR/target/release/obscura-node"
+WALLET_SCRIPT="$SCRIPTS_DIR/obscura_wallet.py"
+TESTNET_SCRIPT="$SCRIPTS_DIR/launch_testnet.py"
+COMPOSE_FILE="$SCRIPT_DIR/docker-compose.yml"
+PYTHON="${TONKL_PYTHON:-python3}"
+DEFAULT_NODE_URL="${TONKL_NODE_URL:-http://127.0.0.1:9100}"
+
+# ─── Colors ──────────────────────────────────────────────────────
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[0;33m'
+CYAN='\033[0;36m'
+BOLD='\033[1m'
+NC='\033[0m'
+
+_banner() {
+    echo ""
+    echo -e "${CYAN}${BOLD}"
+    echo "  ╔══════════════════════════════════════════════════╗"
+    echo "  ║                                                  ║"
+    echo "  ║        T O N K L   P R O T O C O L               ║"
+    echo "  ║        Privacy-Preserving Blockchain              ║"
+    echo "  ║                                                  ║"
+    echo "  ╚══════════════════════════════════════════════════╝"
+    echo -e "${NC}"
+}
+
+_ok()   { echo -e "  ${GREEN}✓${NC} $1"; }
+_warn() { echo -e "  ${YELLOW}⚠${NC} $1"; }
+_fail() { echo -e "  ${RED}✗${NC} $1"; }
+_info() { echo -e "  ${CYAN}→${NC} $1"; }
+
+# ─── doctor: check all prerequisites ────────────────────────────
+cmd_doctor() {
+    _banner
+    echo -e "  ${BOLD}Checking prerequisites...${NC}"
+    echo ""
+
+    local ok=true
+
+    # Rust
+    if command -v cargo &>/dev/null; then
+        _ok "cargo $(cargo --version 2>/dev/null | awk '{print $2}')"
+    else
+        _fail "cargo not found — install Rust: https://rustup.rs"
+        ok=false
+    fi
+
+    # Python
+    if command -v "$PYTHON" &>/dev/null; then
+        _ok "$PYTHON $($PYTHON --version 2>&1 | awk '{print $2}')"
+    else
+        _fail "$PYTHON not found — install Python 3.10+"
+        ok=false
+    fi
+
+    # Noir (nargo)
+    if command -v nargo &>/dev/null; then
+        _ok "nargo $(nargo --version 2>/dev/null | awk '{print $2}' || echo 'found')"
+    else
+        _warn "nargo not found — needed for proof generation"
+        _info "Install: https://noir-lang.org/docs/getting_started/installation"
+    fi
+
+    # Barretenberg (bb)
+    if command -v bb &>/dev/null; then
+        _ok "bb (Barretenberg) found"
+    else
+        _warn "bb not found — needed for proof verification"
+        _info "Install: https://github.com/AztecProtocol/aztec-packages"
+    fi
+
+    # Docker (optional)
+    if command -v docker &>/dev/null; then
+        _ok "docker $(docker --version 2>/dev/null | awk '{print $3}' | tr -d ',')"
+        if docker info &>/dev/null 2>&1; then
+            _ok "Docker daemon running"
+        else
+            _warn "Docker daemon not running"
+        fi
+    else
+        _warn "docker not found — optional, for containerized testnet"
+        _info "Install: https://docs.docker.com/get-docker/"
+    fi
+
+    # Node binary
+    if [[ -f "$NODE_BIN" ]]; then
+        _ok "Node binary built"
+    else
+        _warn "Node binary not built yet"
+        _info "Run: ./tonkl build  (or use --docker to skip)"
+    fi
+
+    echo ""
+    if $ok; then
+        _ok "All core prerequisites met"
+    else
+        _fail "Some prerequisites missing — see above"
+    fi
+    echo ""
+}
+
+# ─── build: compile everything ───────────────────────────────────
+cmd_build() {
+    _banner
+    echo -e "  ${BOLD}Building Tonkl from source...${NC}"
+    echo ""
+
+    # Build prover
+    if [[ -d "$PROVER_DIR" ]]; then
+        _info "Building tonkl-prover..."
+        (cd "$PROVER_DIR" && cargo build --release 2>&1 | tail -1)
+        _ok "Prover built"
+    fi
+
+    # Build node
+    _info "Building tonkl-node..."
+    (cd "$NODE_DIR" && cargo build --release 2>&1 | tail -1)
+    _ok "Node built"
+
+    echo ""
+    _ok "Build complete. Run: ./tonkl testnet start"
+    echo ""
+}
+
+# ─── testnet: launch or manage testnet ───────────────────────────
+cmd_testnet() {
+    local subcmd="${1:-start}"
+    shift 2>/dev/null || true
+
+    case "$subcmd" in
+        start)
+            # Check for --docker flag
+            local use_docker=false
+            local args=()
+            for arg in "$@"; do
+                if [[ "$arg" == "--docker" ]]; then
+                    use_docker=true
+                else
+                    args+=("$arg")
+                fi
+            done
+
+            if $use_docker; then
+                cmd_testnet_docker ${args[@]+"${args[@]}"}
+                return
+            fi
+
+            # Check prerequisites
+            if [[ ! -f "$NODE_BIN" ]]; then
+                _fail "Node binary not found. Building first..."
+                echo ""
+                cmd_build
+            fi
+
+            if ! command -v "$PYTHON" &>/dev/null; then
+                _fail "Python not found. Install Python 3.10+ and try again."
+                exit 1
+            fi
+
+            # Forward remaining args to launch_testnet.py
+            exec "$PYTHON" "$TESTNET_SCRIPT" ${args[@]+"${args[@]}"}
+            ;;
+
+        stop)
+            if docker compose -f "$COMPOSE_FILE" ps --quiet 2>/dev/null | grep -q .; then
+                _info "Stopping Docker testnet..."
+                docker compose -f "$COMPOSE_FILE" down
+                _ok "Docker testnet stopped"
+            else
+                echo "  Testnet runs in the foreground — press Ctrl+C in the testnet terminal to stop."
+            fi
+            ;;
+
+        *)
+            echo "Usage: tonkl testnet start [--nodes N] [--base-port PORT] [--skip-genesis]"
+            echo "       tonkl testnet start --docker     Start via Docker Compose"
+            echo "       tonkl testnet stop"
+            exit 1
+            ;;
+    esac
+}
+
+# ─── testnet via Docker Compose ─────────────────────────────────
+cmd_testnet_docker() {
+    _banner
+    echo -e "  ${BOLD}Starting Tonkl testnet via Docker...${NC}"
+    echo ""
+
+    if ! command -v docker &>/dev/null; then
+        _fail "Docker not found. Install Docker: https://docs.docker.com/get-docker/"
+        exit 1
+    fi
+
+    if ! docker info &>/dev/null 2>&1; then
+        _fail "Docker daemon not running. Start Docker and try again."
+        exit 1
+    fi
+
+    if [[ ! -f "$COMPOSE_FILE" ]]; then
+        _fail "docker-compose.yml not found at $COMPOSE_FILE"
+        exit 1
+    fi
+
+    _info "Building and starting containers..."
+    echo ""
+
+    docker compose -f "$COMPOSE_FILE" up --build "$@"
+}
+
+# ─── wallet: run wallet commands ─────────────────────────────────
+cmd_wallet() {
+    if [[ ! -f "$WALLET_SCRIPT" ]]; then
+        _fail "Wallet script not found at $WALLET_SCRIPT"
+        exit 1
+    fi
+
+    if ! command -v "$PYTHON" &>/dev/null; then
+        _fail "Python not found. Install Python 3.10+ and try again."
+        exit 1
+    fi
+
+    # If no args, launch interactive wallet
+    if [[ $# -eq 0 ]]; then
+        exec "$PYTHON" "$WALLET_SCRIPT" --node-url "$DEFAULT_NODE_URL"
+    fi
+
+    # Forward all args to wallet
+    exec "$PYTHON" "$WALLET_SCRIPT" --node-url "$DEFAULT_NODE_URL" "$@"
+}
+
+# ─── node: run node commands ─────────────────────────────────────
+cmd_node() {
+    local subcmd="${1:-status}"
+    shift 2>/dev/null || true
+
+    case "$subcmd" in
+        run)
+            if [[ ! -f "$NODE_BIN" ]]; then
+                _fail "Node binary not found. Run: ./tonkl build"
+                exit 1
+            fi
+            exec "$NODE_BIN" run "$@"
+            ;;
+
+        status)
+            if [[ ! -f "$NODE_BIN" ]]; then
+                # Fallback to curl
+                echo "  Querying node at $DEFAULT_NODE_URL ..."
+                curl -s "$DEFAULT_NODE_URL" -X POST \
+                    -H "Content-Type: application/json" \
+                    -d '{"jsonrpc":"2.0","method":"get_status","params":[],"id":1}' \
+                    2>/dev/null | python3 -m json.tool 2>/dev/null || \
+                    echo "  Could not reach node at $DEFAULT_NODE_URL"
+                return
+            fi
+            exec "$NODE_BIN" status "$@"
+            ;;
+
+        *)
+            echo "Usage: tonkl node run [--port PORT] [--data-dir DIR] [--vk-dir DIR]"
+            echo "       tonkl node status"
+            exit 1
+            ;;
+    esac
+}
+
+# ─── help ────────────────────────────────────────────────────────
+cmd_help() {
+    _banner
+    echo -e "  ${BOLD}Usage:${NC}"
+    echo ""
+    echo "    tonkl testnet start          Start a local testnet (builds if needed)"
+    echo "    tonkl testnet start -n 1     Quick single-node testnet"
+    echo "    tonkl testnet start --docker Start testnet via Docker (no Rust needed)"
+    echo "    tonkl testnet stop           Stop Docker testnet"
+    echo ""
+    echo "    tonkl wallet                 Launch interactive wallet"
+    echo "    tonkl wallet balance          Check your balance"
+    echo "    tonkl wallet faucet           Request testnet tokens"
+    echo "    tonkl wallet send             Send shielded transaction"
+    echo "    tonkl wallet history          View transaction history"
+    echo ""
+    echo "    tonkl node run               Start a standalone node"
+    echo "    tonkl node status            Query node status"
+    echo ""
+    echo "    tonkl build                  Build node and prover from source"
+    echo "    tonkl doctor                 Check all prerequisites"
+    echo ""
+    echo -e "  ${BOLD}Environment:${NC}"
+    echo ""
+    echo "    TONKL_NODE_URL               Node RPC URL (default: http://127.0.0.1:9100)"
+    echo "    TONKL_PYTHON                 Python binary (default: python3)"
+    echo ""
+}
+
+# ─── Main dispatch ───────────────────────────────────────────────
+main() {
+    local cmd="${1:-help}"
+    shift 2>/dev/null || true
+
+    case "$cmd" in
+        testnet)   cmd_testnet "$@" ;;
+        wallet)    cmd_wallet "$@" ;;
+        node)      cmd_node "$@" ;;
+        build)     cmd_build ;;
+        doctor)    cmd_doctor ;;
+        help|--help|-h)  cmd_help ;;
+        *)
+            _fail "Unknown command: $cmd"
+            echo ""
+            cmd_help
+            exit 1
+            ;;
+    esac
+}
+
+main "$@"

@@ -1,0 +1,24 @@
+# Noir build artifacts
+/target/
+
+# SECURITY: Prover.toml contains spending keys (sk) in plaintext.
+# The pipeline deletes this file after witness generation, but this
+# entry is a hard backstop to prevent accidental commits.
+# NEVER remove this line. Committing sk = theft risk for all users.
+Prover.toml
+
+# Verifier.toml contains only public inputs (safe), but excluded to
+# avoid committing test-specific values that change every run.
+Verifier.toml
+
+# SECURITY: The solved witness encodes sk as a circuit variable.
+# The pipeline deletes this after proving. Never commit.
+*.gz
+
+# Proof files -- regenerate locally, not reproducible across runs
+proofs/
+
+# Python cache
+__pycache__/
+*.pyc
+.pytest_cache/

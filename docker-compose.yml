@@ -1,0 +1,86 @@
+# ───────────────────────────────────────────────────────────────────
+# Tonkl Protocol — Docker Compose Testnet
+#
+# Usage:
+#   docker compose up              Start a 3-node testnet
+#   docker compose up node-0       Single-node quickstart
+#   docker compose up --scale ...  Custom node count
+#   docker compose down -v         Tear down + remove volumes
+#
+# Each node exposes its RPC port:
+#   node-0: http://localhost:9100
+#   node-1: http://localhost:9101
+#   node-2: http://localhost:9102
+# ───────────────────────────────────────────────────────────────────
+
+services:
+  # ─── Primary node ───────────────────────────────────────────────
+  node-0:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.node
+    container_name: tonkl-node-0
+    ports:
+      - "9100:9100"
+    volumes:
+      - node0-data:/tonkl/data
+    environment:
+      - RUST_LOG=info
+    command: ["run", "--bind", "0.0.0.0", "--port", "9100", "--data-dir", "/tonkl/data"]
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "-X", "POST", "-H", "Content-Type: application/json",
+             "-d", '{"jsonrpc":"2.0","method":"get_status","params":[],"id":1}',
+             "http://localhost:9100"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+    networks:
+      - tonkl-net
+
+  # ─── Secondary node 1 ──────────────────────────────────────────
+  node-1:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.node
+    container_name: tonkl-node-1
+    ports:
+      - "9101:9100"
+    volumes:
+      - node1-data:/tonkl/data
+    environment:
+      - RUST_LOG=info
+    command: ["run", "--bind", "0.0.0.0", "--port", "9100", "--data-dir", "/tonkl/data"]
+    depends_on:
+      node-0:
+        condition: service_healthy
+    networks:
+      - tonkl-net
+
+  # ─── Secondary node 2 ──────────────────────────────────────────
+  node-2:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.node
+    container_name: tonkl-node-2
+    ports:
+      - "9102:9100"
+    volumes:
+      - node2-data:/tonkl/data
+    environment:
+      - RUST_LOG=info
+    command: ["run", "--bind", "0.0.0.0", "--port", "9100", "--data-dir", "/tonkl/data"]
+    depends_on:
+      node-0:
+        condition: service_healthy
+    networks:
+      - tonkl-net
+
+volumes:
+  node0-data:
+  node1-data:
+  node2-data:
+
+networks:
+  tonkl-net:
+    driver: bridge

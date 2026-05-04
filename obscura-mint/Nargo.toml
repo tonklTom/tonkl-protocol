@@ -1,0 +1,23 @@
+[package]
+name = "obscura_mint"
+type = "bin"
+authors = ["Tonkl Protocol"]
+compiler_version = ">=0.31.0"
+
+# Tonkl Mint Circuit — 0-in/32-out (production)
+#
+# Creates up to 32 new notes from nothing, authorized by a mint authority.
+# The authority proves knowledge of the secret key behind a known public
+# key, and each output note can be owned by a different recipient.
+# No inputs are consumed (no Merkle tree, no nullifiers).
+#
+# For fewer than 32 real outputs, pad remaining with zero-value notes
+# owned by the authority to avoid leaking the actual recipient count.
+#
+# Whitepaper refs:
+#   Section 7.5 - Enforced output templates
+#   Section 8.3 - Noir as unified circuit DSL
+#   Section 8.6 - MVP Phase 1 circuit scope
+
+[dependencies]
+obscura_lib = { path = "../obscura-lib" }

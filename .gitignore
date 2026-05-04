@@ -1,0 +1,60 @@
+# ─── Rust ────────────────────────────────────────────
+target/
+**/*.rs.bk
+Cargo.lock
+# Keep Cargo.lock in workspace subcrates that are binaries (obscura-node)
+!obscura-node/Cargo.lock
+
+# ─── Noir (ZK circuits) ─────────────────────────────
+**/target/
+**/proofs/
+**/Prover.toml
+**/Verifier.toml
+!**/Verifier.toml  # These are checked in as test fixtures
+
+# ─── Testnet runtime data ────────────────────────────
+obscura-data/
+tonkl-data/
+*.db
+*.sqlite
+faucet_wallet.db
+node_wallet.db
+
+# ─── Logs & temp ─────────────────────────────────────
+*.log
+*.tmp
+*.swp
+*.swo
+*~
+
+# ─── OS files ────────────────────────────────────────
+.DS_Store
+Thumbs.db
+
+# ─── IDE ─────────────────────────────────────────────
+.vscode/
+.idea/
+*.iml
+
+# ─── Environment & secrets ───────────────────────────
+.env
+.env.local
+.env.*.local
+*.pem
+*.key
+
+# ─── Docker runtime ─────────────────────────────────
+docker/data/
+docker/logs/
+
+# ─── Python ──────────────────────────────────────────
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# ─── Build artifacts ────────────────────────────────
+*.so
+*.dylib
+*.dll

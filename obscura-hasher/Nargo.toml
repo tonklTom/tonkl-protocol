@@ -1,0 +1,13 @@
+[package]
+name = "obscura_hasher"
+type = "bin"
+authors = ["Obscura Protocol"]
+compiler_version = ">=0.31.0"
+
+# Hash oracle — computes note commitments, nullifiers, and Merkle root
+# from raw note data. Used by generate_witness.py to produce valid
+# Prover.toml values for the main obscura_transfer circuit.
+# Run: nargo execute  (outputs values to target/obscura_hasher.gz)
+# Then: python3 ../obscura-transfer/scripts/generate_witness.py
+
+[dependencies]

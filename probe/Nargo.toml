@@ -1,0 +1,7 @@
+[package]
+name = "probe"
+type = "bin"
+authors = ["Obscura"]
+compiler_version = ">=0.31.0"
+
+[dependencies]
