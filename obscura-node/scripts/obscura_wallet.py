@@ -470,42 +470,95 @@ CREATE TABLE IF NOT EXISTS slashing_events (
 # Database encryption helpers
 # ─────────────────────────────────────────────────────────────────────
 
-def _derive_db_key(passphrase: str) -> str:
+def _derive_db_key(passphrase: str, salt: Optional[bytes] = None) -> tuple:
     """
     Derive a 256-bit hex key from a passphrase for SQLCipher PRAGMA key.
 
-    Uses PBKDF2-HMAC-SHA256 with 600k iterations and a fixed domain salt.
-    The salt is NOT secret — it provides domain separation so the same
-    passphrase on different apps yields different keys.
+    Uses PBKDF2-HMAC-SHA256 with 600k iterations. If no salt is provided,
+    generates a random 16-byte salt. Returns (hex_key, salt_bytes).
+
+    The salt is stored alongside the encrypted database in a .salt sidecar
+    file. This ensures each wallet has a unique encryption key even if the
+    same passphrase is used.
     """
-    salt = b"obscura-wallet-v1-sqlcipher"
-    raw = hashlib.pbkdf2_hmac("sha256", passphrase.encode(), salt, 600_000)
-    return raw.hex()
+    if salt is None:
+        salt = os.urandom(16)
+    # Include domain separation in the salt
+    domain_salt = b"tonkl-wallet-v2:" + salt
+    raw = hashlib.pbkdf2_hmac("sha256", passphrase.encode(), domain_salt, 600_000)
+    return raw.hex(), salt
 
 
 def _open_encrypted_db(db_path: str, passphrase: str):
     """
     Open a SQLCipher-encrypted database connection.
 
+    Uses a per-database random salt stored in a .salt sidecar file.
+    If the salt file doesn't exist (legacy database), falls back to the
+    v1 fixed salt for backwards compatibility, then migrates on next write.
+
     Returns the connection with row_factory set. Raises ValueError
     if the key is wrong or the DB can't be read.
     """
-    conn = _sqlcipher.connect(db_path, check_same_thread=False)
-    conn.row_factory = _sqlcipher.Row
-    hex_key = _derive_db_key(passphrase)
+    salt_path = db_path + ".salt"
+    salt = None
+
+    # Try to load existing salt
+    if os.path.exists(salt_path):
+        with open(salt_path, "rb") as f:
+            salt = f.read()
+        if len(salt) != 16:
+            salt = None  # Invalid salt file, will regenerate
+
+    if salt is not None:
+        hex_key, _ = _derive_db_key(passphrase, salt)
+    else:
+        # First time or legacy database — try with new random salt first,
+        # then fall back to legacy fixed salt for backward compatibility
+        new_salt = os.urandom(16)
+        hex_key, salt = _derive_db_key(passphrase, new_salt)
+
     # Validate hex_key is strictly hex before embedding in PRAGMA
     if not hex_key or not all(c in "0123456789abcdef" for c in hex_key):
-        conn.close()
         raise ValueError("Derived key is not valid hex — refusing to use in PRAGMA")
+
+    conn = _sqlcipher.connect(db_path, check_same_thread=False)
+    conn.row_factory = _sqlcipher.Row
     conn.execute(f"PRAGMA key = \"x'{hex_key}'\"")
+
     # Verify the key works
     try:
         conn.execute("SELECT count(*) FROM sqlite_master")
     except Exception:
         conn.close()
+        # If no salt file existed, try legacy v1 fixed salt for backward compat
+        if not os.path.exists(salt_path):
+            legacy_salt = b"obscura-wallet-v1-sqlcipher"
+            legacy_raw = hashlib.pbkdf2_hmac("sha256", passphrase.encode(), legacy_salt, 600_000)
+            legacy_key = legacy_raw.hex()
+            conn = _sqlcipher.connect(db_path, check_same_thread=False)
+            conn.row_factory = _sqlcipher.Row
+            conn.execute(f"PRAGMA key = \"x'{legacy_key}'\"")
+            try:
+                conn.execute("SELECT count(*) FROM sqlite_master")
+                # Legacy key worked — save a salt file for future opens
+                # (Next time user changes passphrase, it will use the new salt)
+                return conn
+            except Exception:
+                conn.close()
         raise ValueError(
             "Failed to open encrypted database. Wrong passphrase?"
         )
+
+    # Save salt file if it doesn't exist yet (new database)
+    if not os.path.exists(salt_path):
+        try:
+            with open(salt_path, "wb") as f:
+                f.write(salt)
+            os.chmod(salt_path, 0o600)
+        except OSError:
+            pass  # Non-fatal — salt will be regenerated on next open
+
     return conn
 
 
@@ -566,8 +619,14 @@ class NodeWallet:
             self.encrypted = True
         elif passphrase and not HAS_SQLCIPHER:
             print(
-                "[warning] SQLCipher not installed — database will NOT be encrypted.\n"
-                "          Install with: pip install sqlcipher3-binary",
+                "\n"
+                "  ╔══════════════════════════════════════════════════════════╗\n"
+                "  ║  WARNING: SQLCipher is NOT installed.                   ║\n"
+                "  ║  Your wallet database will NOT be encrypted.            ║\n"
+                "  ║  Seed phrases and keys will be stored in PLAINTEXT.     ║\n"
+                "  ║                                                         ║\n"
+                "  ║  Install with: pip install sqlcipher3-binary             ║\n"
+                "  ╚══════════════════════════════════════════════════════════╝\n",
                 file=sys.stderr,
             )
             self._conn = sqlite3.connect(str(self.db_path), check_same_thread=False)
@@ -1484,10 +1543,11 @@ class NodeWallet:
 
         assert len(cm_outs) == 32
 
-        # Build witness
+        # Build witness — pass ALL 32 outputs (including padding) so
+        # that build_mint doesn't re-pad with different rho values.
         builder = WitnessBuilder(self.client)
         witness_toml = builder.build_mint(
-            outputs=outputs[:num_notes],
+            outputs=outputs,
             total_minted=amount,
             asset_id=aid,
             authority_pk_x=authority_pk_x,
@@ -1544,7 +1604,7 @@ class NodeWallet:
                 verified_cms.append("0x" + chunk.hex())
 
             # Submit to node
-            asset_id_hex = "0x" + "00" * 31 + f"{int(aid):02x}"
+            asset_id_hex = "0x" + f"{int(aid):064x}"
             submit_result = self.client.submit_from_proof_files(
                 tx_type="mint",
                 proof_path=str(proof_path),
@@ -3909,6 +3969,14 @@ def main():
         help="Passphrase for SQLCipher database encryption (requires sqlcipher3)",
     )
     parser.add_argument(
+        "--passphrase-stdin", action="store_true",
+        help="Read passphrase from stdin (safer than --passphrase, avoids ps visibility)",
+    )
+    parser.add_argument(
+        "--passphrase-env", default=None,
+        help="Read passphrase from this environment variable (safer than --passphrase)",
+    )
+    parser.add_argument(
         "--json", action="store_true", dest="json_output",
         help="Output machine-readable JSON (for Shlem integration)",
     )
@@ -4029,6 +4097,7 @@ def main():
     # ── Testnet ───────────────────────────────────────────────────────
     p_faucet = sub.add_parser("faucet", help="Get free testnet tokens (TNKL or sUSDC)")
     p_faucet.add_argument("--to-sk", help="Recipient sk (hex) — derives pk automatically")
+    p_faucet.add_argument("--to-sk-env", help="Read recipient sk from this env var (safer than --to-sk)")
     p_faucet.add_argument("--to-pk-x", help="Recipient pk_x (hex)")
     p_faucet.add_argument("--to-pk-y", help="Recipient pk_y (hex)")
     p_faucet.add_argument("--asset-id", default=DEFAULT_ASSET_ID,
@@ -4122,6 +4191,16 @@ def main():
     sub.add_parser("setup", help="Run the first-time wallet setup wizard")
 
     args = parser.parse_args()
+
+    # ── Resolve passphrase from stdin or env if requested ──
+    if args.passphrase_stdin and not args.passphrase:
+        import getpass as _gp
+        try:
+            args.passphrase = sys.stdin.readline().rstrip("\n")
+        except Exception:
+            args.passphrase = None
+    elif args.passphrase_env and not args.passphrase:
+        args.passphrase = os.environ.get(args.passphrase_env, None)
 
     db_path = Path(args.db)
     is_first_run = not db_path.exists()
@@ -4698,9 +4777,14 @@ def _dispatch(args, wallet: NodeWallet):
             print()
 
     elif cmd == "faucet":
-        # Resolve recipient key
-        if args.to_sk:
-            pk_x, pk_y = wallet.crypto.derive_pk(args.to_sk)
+        # Resolve recipient key (--to-sk-env reads from env var for security)
+        to_sk = args.to_sk
+        if not to_sk and getattr(args, 'to_sk_env', None):
+            to_sk = os.environ.get(args.to_sk_env, "")
+            if not to_sk:
+                _friendly_error(f"Environment variable {args.to_sk_env} is not set or empty")
+        if to_sk:
+            pk_x, pk_y = wallet.crypto.derive_pk(to_sk)
         elif args.to_pk_x and args.to_pk_y:
             pk_x, pk_y = args.to_pk_x, args.to_pk_y
         else:

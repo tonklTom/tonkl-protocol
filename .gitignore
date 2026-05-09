@@ -15,6 +15,7 @@ Cargo.lock
 # ─── Testnet runtime data ────────────────────────────
 obscura-data/
 tonkl-data/
+testnet.json
 *.db
 *.sqlite
 faucet_wallet.db

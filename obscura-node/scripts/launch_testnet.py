@@ -63,7 +63,7 @@ BANNER = r"""
   │          T O N K L   T E S T N E T                           │
   │          Privacy-Preserving Blockchain                       │
   │                                                              │
-  │          Version: 0.1.0-beta                                 │
+  │          Version: 0.2.0-beta (P2P enabled)                    │
   │          Network: tonkl-testnet-1                            │
   │                                                              │
   └──────────────────────────────────────────────────────────────┘
@@ -115,8 +115,17 @@ class TestnetNode:
         self.process: Optional[subprocess.Popen] = None
         self.client = TonklClient(self.url, timeout=30.0)
 
-    def start(self) -> None:
-        """Start the node process."""
+    def start(
+        self,
+        bootstrap_addr: str = "",
+        sync_from: str = "",
+    ) -> None:
+        """Start the node process.
+
+        Args:
+            bootstrap_addr: Multiaddr of a bootstrap peer for P2P discovery.
+            sync_from: RPC URL of a peer to sync blocks from on startup.
+        """
         if self.process is not None:
             return
 
@@ -134,6 +143,16 @@ class TestnetNode:
         if self.num_nodes > 1:
             validator_ids = ",".join(f"node-{i}" for i in range(self.num_nodes))
             cmd.extend(["--validators", validator_ids])
+
+        # P2P networking
+        if self.p2p_port > 0:
+            cmd.extend(["--p2p-port", str(self.p2p_port)])
+            if bootstrap_addr:
+                cmd.extend(["--bootstrap", bootstrap_addr])
+
+        # Chain sync from existing peer
+        if sync_from:
+            cmd.extend(["--sync-from", sync_from])
 
         self.process = subprocess.Popen(
             cmd,
@@ -308,23 +327,14 @@ class Testnet:
         else:
             self._log("  [4/7] Skipping genesis (--skip-genesis)")
 
-        # ── Step 5: Replicate state ───────────────────────────────────
+        # ── Step 5: P2P sync info ─────────────────────────────────────
         step_start = time.time()
-        if self.num_nodes > 1 and not self.skip_genesis:
-            self._log(f"  [5/7] Replicating state to {self.num_nodes - 1} secondary node(s)...")
-            primary.stop()
-            time.sleep(0.5)
-
-            for i in range(1, self.num_nodes):
-                src_data = Path(self.data_dirs[0])
-                dst_data = Path(self.data_dirs[i])
-                shutil.rmtree(dst_data)
-                shutil.copytree(str(src_data), str(dst_data))
-
-            primary.start()
-            if not primary.wait_ready():
-                raise RuntimeError("Primary node failed to restart after state copy")
-            self._log(f"        ✓ {self.num_nodes - 1} node(s) synced ({_elapsed(step_start)})")
+        primary_bootstrap = f"/ip4/127.0.0.1/tcp/{self.base_p2p_port}"
+        if self.num_nodes > 1:
+            self._log(f"  [5/7] Secondary nodes will sync via P2P + RPC...")
+            self._log(f"        Bootstrap peer: {primary_bootstrap}")
+            self._log(f"        Sync source:    {primary.url}")
+            self._log(f"        ✓ Ready ({_elapsed(step_start)})")
         else:
             self._log("  [5/7] Single node — no replication needed")
 
@@ -341,12 +351,15 @@ class Testnet:
                     p2p_port=self.base_p2p_port + i,
                     num_nodes=self.num_nodes,
                 )
-                node.start()
+                node.start(
+                    bootstrap_addr=primary_bootstrap,
+                    sync_from=primary.url,
+                )
                 self.nodes.append(node)
 
-                if not node.wait_ready():
+                if not node.wait_ready(timeout=30.0):  # longer timeout for sync
                     raise RuntimeError(f"Node {i} failed to start")
-                self._log(f"        ✓ Node {i} listening at {node.url}")
+                self._log(f"        ✓ Node {i} listening at {node.url} (P2P :{node.p2p_port})")
 
             # Verify state consistency
             primary_status = primary.get_status()

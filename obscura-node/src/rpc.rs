@@ -12,9 +12,10 @@ use jsonrpsee::types::ErrorObjectOwned;
 use tower_http::cors::{AllowOrigin, CorsLayer};
 use obscura_prover::{AcirField, FieldElement};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
-use std::sync::Arc;
-use tokio::sync::RwLock;
+use std::collections::{HashMap, VecDeque};
+use std::sync::{Arc, Mutex};
+use std::time::Instant;
+use tokio::sync::{mpsc, RwLock};
 use tracing::info;
 
 // ─────────────────────────────────────────────────────────────────────
@@ -107,8 +108,9 @@ pub trait TonklRpc {
     #[method(name = "get_nullifier_status")]
     async fn get_nullifier_status(&self, nullifier: String) -> Result<bool, ErrorObjectOwned>;
 
+    /// Submit a transaction. Requires `secret` if TONKL_RPC_SECRET is set.
     #[method(name = "submit_tx")]
-    async fn submit_tx(&self, request: SubmitTxRequest) -> Result<SubmitTxResponse, ErrorObjectOwned>;
+    async fn submit_tx(&self, request: SubmitTxRequest, secret: Option<String>) -> Result<SubmitTxResponse, ErrorObjectOwned>;
 
     #[method(name = "get_tx_status")]
     async fn get_tx_status(&self, tx_hash: String) -> Result<TxStatusResponse, ErrorObjectOwned>;
@@ -116,13 +118,20 @@ pub trait TonklRpc {
     #[method(name = "get_block")]
     async fn get_block(&self, block_number: u64) -> Result<Option<Block>, ErrorObjectOwned>;
 
-    #[method(name = "produce_block")]
-    async fn produce_block(&self) -> Result<BlockHeader, ErrorObjectOwned>;
+    /// Get a range of blocks for chain sync. Returns up to 50 blocks starting from `from_block`.
+    #[method(name = "get_blocks_range")]
+    async fn get_blocks_range(&self, from_block: u64, count: u64) -> Result<Vec<Block>, ErrorObjectOwned>;
 
+    /// Produce a block. Requires `secret` if TONKL_RPC_SECRET is set.
+    #[method(name = "produce_block")]
+    async fn produce_block(&self, secret: Option<String>) -> Result<BlockHeader, ErrorObjectOwned>;
+
+    /// Store encrypted notes. Requires `secret` if TONKL_RPC_SECRET is set.
     #[method(name = "store_encrypted_notes")]
     async fn store_encrypted_notes(
         &self,
         request: StoreEncryptedNotesRequest,
+        secret: Option<String>,
     ) -> Result<StoreEncryptedNotesResponse, ErrorObjectOwned>;
 
     #[method(name = "get_encrypted_notes")]
@@ -131,6 +140,84 @@ pub trait TonklRpc {
         from_index: u64,
         count: u64,
     ) -> Result<GetEncryptedNotesResponse, ErrorObjectOwned>;
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// RPC Rate Limiter (sliding window, in-memory)
+// ─────────────────────────────────────────────────────────────────────
+
+/// Per-method rate limit configuration.
+struct RateLimit {
+    max_requests: usize,
+    window: std::time::Duration,
+}
+
+/// Simple sliding-window rate limiter.
+/// Tracks timestamps of recent calls per method; rejects when the window is full.
+/// Uses `std::sync::Mutex` (not tokio) because the critical section is just
+/// a VecDeque push/drain — sub-microsecond, never awaits.
+struct RpcRateLimiter {
+    buckets: Mutex<HashMap<&'static str, VecDeque<Instant>>>,
+    limits: HashMap<&'static str, RateLimit>,
+}
+
+impl RpcRateLimiter {
+    fn new() -> Self {
+        let mut limits = HashMap::new();
+        // Write endpoints — heavier, stricter limits
+        limits.insert("submit_tx", RateLimit { max_requests: 10, window: std::time::Duration::from_secs(60) });
+        limits.insert("produce_block", RateLimit { max_requests: 5, window: std::time::Duration::from_secs(60) });
+        limits.insert("store_encrypted_notes", RateLimit { max_requests: 20, window: std::time::Duration::from_secs(60) });
+        // Read endpoints — generous limits
+        limits.insert("get_status", RateLimit { max_requests: 120, window: std::time::Duration::from_secs(60) });
+        limits.insert("get_merkle_root", RateLimit { max_requests: 120, window: std::time::Duration::from_secs(60) });
+        limits.insert("get_merkle_proof", RateLimit { max_requests: 60, window: std::time::Duration::from_secs(60) });
+        limits.insert("get_nullifier_status", RateLimit { max_requests: 60, window: std::time::Duration::from_secs(60) });
+        limits.insert("get_tx_status", RateLimit { max_requests: 60, window: std::time::Duration::from_secs(60) });
+        limits.insert("get_block", RateLimit { max_requests: 60, window: std::time::Duration::from_secs(60) });
+        limits.insert("get_blocks_range", RateLimit { max_requests: 30, window: std::time::Duration::from_secs(60) });
+        limits.insert("get_encrypted_notes", RateLimit { max_requests: 60, window: std::time::Duration::from_secs(60) });
+
+        Self {
+            buckets: Mutex::new(HashMap::new()),
+            limits,
+        }
+    }
+
+    /// Returns Ok(()) if the call is allowed, Err with a JSON-RPC error if rate limited.
+    fn check(&self, method: &'static str) -> Result<(), ErrorObjectOwned> {
+        let limit = match self.limits.get(method) {
+            Some(l) => l,
+            None => return Ok(()), // no limit configured → allow
+        };
+
+        let now = Instant::now();
+        let mut buckets = self.buckets.lock().unwrap_or_else(|e| e.into_inner());
+        let window = buckets.entry(method).or_insert_with(VecDeque::new);
+
+        // Drain expired entries
+        while let Some(&front) = window.front() {
+            if now.duration_since(front) > limit.window {
+                window.pop_front();
+            } else {
+                break;
+            }
+        }
+
+        if window.len() >= limit.max_requests {
+            return Err(ErrorObjectOwned::owned(
+                -32029,
+                format!(
+                    "rate limited: {} allows {} requests per {}s",
+                    method, limit.max_requests, limit.window.as_secs()
+                ),
+                None::<()>,
+            ));
+        }
+
+        window.push_back(now);
+        Ok(())
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -160,13 +247,40 @@ pub struct NodeState {
 
 pub struct RpcServer {
     state: Arc<RwLock<NodeState>>,
+    /// Optional secret token required for write operations (submit_tx, produce_block, store_encrypted_notes).
+    /// Set via TONKL_RPC_SECRET environment variable. If empty, write ops are unrestricted (dev mode).
+    rpc_secret: Option<String>,
+    /// Per-method sliding-window rate limiter.
+    rate_limiter: RpcRateLimiter,
+    /// Optional channel to broadcast accepted transactions to the P2P layer.
+    /// When a transaction is accepted via submit_tx, a clone is sent here
+    /// so the P2P layer can gossip it to peers.
+    tx_broadcast: Option<mpsc::Sender<Transaction>>,
 }
 
 impl RpcServer {
-    pub fn new(state: Arc<RwLock<NodeState>>) -> Self {
-        Self { state }
+    pub fn new(state: Arc<RwLock<NodeState>>, tx_broadcast: Option<mpsc::Sender<Transaction>>) -> Self {
+        let rpc_secret = std::env::var("TONKL_RPC_SECRET").ok().filter(|s| !s.is_empty());
+        if rpc_secret.is_some() {
+            info!("RPC write operations require TONKL_RPC_SECRET authentication");
+        } else {
+            tracing::warn!("TONKL_RPC_SECRET not set — write operations are unrestricted (development mode)");
+        }
+        Self {
+            state,
+            rpc_secret,
+            rate_limiter: RpcRateLimiter::new(),
+            tx_broadcast,
+        }
     }
 }
+
+// ─── Input size limits for DoS prevention ────────────────────────────
+const MAX_PROOF_HEX_LEN: usize = 16_384;       // 8 KB decoded
+const MAX_COMMITMENTS: usize = 32;               // matches mint circuit max
+const MAX_NULLIFIERS: usize = 2;                  // matches transfer circuit max
+const MAX_PUBLIC_INPUTS: usize = 20;
+const MAX_ENCRYPTED_NOTES_STORE: usize = 64;      // per request
 
 // ─────────────────────────────────────────────────────────────────────
 // RPC Implementation
@@ -178,6 +292,10 @@ fn internal_error(msg: impl ToString) -> ErrorObjectOwned {
 
 fn invalid_params(msg: impl ToString) -> ErrorObjectOwned {
     ErrorObjectOwned::owned(-32602, msg.to_string(), None::<()>)
+}
+
+fn auth_error() -> ErrorObjectOwned {
+    ErrorObjectOwned::owned(-32001, "authentication required: provide valid secret for write operations", None::<()>)
 }
 
 fn parse_field(hex_str: &str) -> Result<FieldElement, ErrorObjectOwned> {
@@ -194,6 +312,7 @@ fn parse_field(hex_str: &str) -> Result<FieldElement, ErrorObjectOwned> {
 #[async_trait]
 impl TonklRpcServer for RpcServer {
     async fn get_status(&self) -> Result<NodeStatus, ErrorObjectOwned> {
+        self.rate_limiter.check("get_status")?;
         let state = self.state.read().await;
         let root = state.note_tree.root().map_err(|e| internal_error(e))?;
 
@@ -207,12 +326,14 @@ impl TonklRpcServer for RpcServer {
     }
 
     async fn get_merkle_root(&self) -> Result<String, ErrorObjectOwned> {
+        self.rate_limiter.check("get_merkle_root")?;
         let state = self.state.read().await;
         let root = state.note_tree.root().map_err(|e| internal_error(e))?;
         Ok(field_to_hex(root))
     }
 
     async fn get_merkle_proof(&self, index: u64) -> Result<MerkleProofResponse, ErrorObjectOwned> {
+        self.rate_limiter.check("get_merkle_proof")?;
         let state = self.state.read().await;
         let leaf_count = state.note_tree.leaf_count();
         if index >= leaf_count && leaf_count > 0 {
@@ -231,12 +352,46 @@ impl TonklRpcServer for RpcServer {
     }
 
     async fn get_nullifier_status(&self, nullifier: String) -> Result<bool, ErrorObjectOwned> {
+        self.rate_limiter.check("get_nullifier_status")?;
         let state = self.state.read().await;
         let nf = parse_field(&nullifier)?;
         state.nullifier_set.contains(&nf).map_err(|e| internal_error(e))
     }
 
-    async fn submit_tx(&self, request: SubmitTxRequest) -> Result<SubmitTxResponse, ErrorObjectOwned> {
+    async fn submit_tx(&self, request: SubmitTxRequest, secret: Option<String>) -> Result<SubmitTxResponse, ErrorObjectOwned> {
+        // ── Rate limit ─────────────────────────────────────────
+        self.rate_limiter.check("submit_tx")?;
+
+        // ── Auth check ──────────────────────────────────────────
+        if let Some(ref expected) = self.rpc_secret {
+            match &secret {
+                Some(s) if s == expected => {}
+                _ => return Err(auth_error()),
+            }
+        }
+
+        // ── Input size validation (DoS prevention) ──────────────
+        if request.proof.len() > MAX_PROOF_HEX_LEN {
+            return Err(invalid_params(format!(
+                "proof too large: {} chars (max {})", request.proof.len(), MAX_PROOF_HEX_LEN
+            )));
+        }
+        if request.new_commitments.len() > MAX_COMMITMENTS {
+            return Err(invalid_params(format!(
+                "too many commitments: {} (max {})", request.new_commitments.len(), MAX_COMMITMENTS
+            )));
+        }
+        if request.nullifiers.len() > MAX_NULLIFIERS {
+            return Err(invalid_params(format!(
+                "too many nullifiers: {} (max {})", request.nullifiers.len(), MAX_NULLIFIERS
+            )));
+        }
+        if request.public_inputs.len() > MAX_PUBLIC_INPUTS {
+            return Err(invalid_params(format!(
+                "too many public inputs: {} (max {})", request.public_inputs.len(), MAX_PUBLIC_INPUTS
+            )));
+        }
+
         let tx_type = match request.tx_type.as_str() {
             "transfer" => TxType::Transfer,
             "merge" => TxType::Merge,
@@ -312,9 +467,21 @@ impl TonklRpcServer for RpcServer {
                 return Err(invalid_params(format!("nullifier already spent: {}", field_to_hex(*nf))));
             }
         }
+        // Clone tx for P2P broadcast before moving into mempool
+        let tx_for_broadcast = if self.tx_broadcast.is_some() {
+            Some(tx.clone())
+        } else {
+            None
+        };
+
         state.mempool.submit_unchecked(tx);
 
         info!("Transaction accepted: {}", tx_hash_hex);
+
+        // Broadcast to P2P peers (non-blocking, fire-and-forget)
+        if let (Some(broadcast_tx), Some(tx_data)) = (&self.tx_broadcast, tx_for_broadcast) {
+            let _ = broadcast_tx.try_send(tx_data);
+        }
 
         Ok(SubmitTxResponse {
             tx_hash: tx_hash_hex,
@@ -323,6 +490,7 @@ impl TonklRpcServer for RpcServer {
     }
 
     async fn get_tx_status(&self, tx_hash: String) -> Result<TxStatusResponse, ErrorObjectOwned> {
+        self.rate_limiter.check("get_tx_status")?;
         let state = self.state.read().await;
         let clean_hash = if tx_hash.starts_with("0x") {
             tx_hash.clone()
@@ -362,11 +530,38 @@ impl TonklRpcServer for RpcServer {
     }
 
     async fn get_block(&self, block_number: u64) -> Result<Option<Block>, ErrorObjectOwned> {
+        self.rate_limiter.check("get_block")?;
         let state = self.state.read().await;
         Ok(state.blocks.get(block_number as usize).cloned())
     }
 
-    async fn produce_block(&self) -> Result<BlockHeader, ErrorObjectOwned> {
+    async fn get_blocks_range(&self, from_block: u64, count: u64) -> Result<Vec<Block>, ErrorObjectOwned> {
+        self.rate_limiter.check("get_blocks_range")?;
+
+        // Cap at 50 blocks per request to prevent abuse
+        let capped_count = count.min(50) as usize;
+        let from = from_block as usize;
+
+        let state = self.state.read().await;
+        let end = (from + capped_count).min(state.blocks.len());
+        if from >= state.blocks.len() {
+            return Ok(Vec::new());
+        }
+        Ok(state.blocks[from..end].to_vec())
+    }
+
+    async fn produce_block(&self, secret: Option<String>) -> Result<BlockHeader, ErrorObjectOwned> {
+        // ── Rate limit ─────────────────────────────────────────
+        self.rate_limiter.check("produce_block")?;
+
+        // ── Auth check ──────────────────────────────────────────
+        if let Some(ref expected) = self.rpc_secret {
+            match &secret {
+                Some(s) if s == expected => {}
+                _ => return Err(auth_error()),
+            }
+        }
+
         let mut state = self.state.write().await;
 
         let txs = state.mempool.drain_for_block(256);
@@ -435,7 +630,26 @@ impl TonklRpcServer for RpcServer {
     async fn store_encrypted_notes(
         &self,
         request: StoreEncryptedNotesRequest,
+        secret: Option<String>,
     ) -> Result<StoreEncryptedNotesResponse, ErrorObjectOwned> {
+        // ── Rate limit ─────────────────────────────────────────
+        self.rate_limiter.check("store_encrypted_notes")?;
+
+        // ── Auth check ──────────────────────────────────────────
+        if let Some(ref expected) = self.rpc_secret {
+            match &secret {
+                Some(s) if s == expected => {}
+                _ => return Err(auth_error()),
+            }
+        }
+
+        // ── Size limit ──────────────────────────────────────────
+        if request.notes.len() > MAX_ENCRYPTED_NOTES_STORE {
+            return Err(invalid_params(format!(
+                "too many notes: {} (max {} per request)", request.notes.len(), MAX_ENCRYPTED_NOTES_STORE
+            )));
+        }
+
         let mut state = self.state.write().await;
 
         let entries: Vec<(u64, Vec<u8>)> = request
@@ -465,6 +679,7 @@ impl TonklRpcServer for RpcServer {
         from_index: u64,
         count: u64,
     ) -> Result<GetEncryptedNotesResponse, ErrorObjectOwned> {
+        self.rate_limiter.check("get_encrypted_notes")?;
         let state = self.state.read().await;
 
         let max_count = count.min(1024);
@@ -494,6 +709,7 @@ impl TonklRpcServer for RpcServer {
 pub async fn start_rpc_server(
     state: Arc<RwLock<NodeState>>,
     addr: &str,
+    tx_broadcast: Option<mpsc::Sender<Transaction>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // CORS: allow only localhost origins for alpha safety.
     // The block explorer and local tools connect from these origins.
@@ -519,7 +735,7 @@ pub async fn start_rpc_server(
         .build(addr.parse::<std::net::SocketAddr>()?)
         .await?;
 
-    let rpc_server = RpcServer::new(state);
+    let rpc_server = RpcServer::new(state, tx_broadcast);
     let handle = server.start(rpc_server.into_rpc());
 
     info!("JSON-RPC server listening on {} (CORS: localhost-only)", addr);

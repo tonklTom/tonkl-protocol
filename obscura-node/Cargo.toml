@@ -1,22 +1,23 @@
 [package]
 name = "obscura-node"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
-description = "Tonkl Protocol single-node kernel. Persistent state tree, nullifier set, block builder/validator, mempool, and JSON-RPC interface."
+description = "Tonkl Protocol node with P2P networking, persistent state, mempool, proof verification, and JSON-RPC."
 
 # ─────────────────────────────────────────────────────────────────────
-# Phase B1: Local Single-Node Kernel
+# Phase B3: P2P Multi-Node Testnet
 #
-# This crate implements the node infrastructure needed to run Tonkl
-# as a local testnet. It builds on top of obscura-prover for all
-# cryptographic operations (Poseidon2 hashing, Merkle trees, proof
-# verification).
+# This crate implements the full node infrastructure for Tonkl,
+# including P2P gossip for block and transaction propagation,
+# round-robin consensus, chain sync, and JSON-RPC.
 #
 # Architecture:
 #   State layer  → sled (embedded key-value store)
 #   Block format → bincode-serialized structs
 #   Mempool      → in-memory priority queue
 #   RPC          → JSON-RPC over HTTP (jsonrpsee)
+#   P2P          → libp2p (gossipsub + mDNS)
+#   Consensus    → round-robin leader rotation
 #   Proofs       → verified via bb (Barretenberg CLI)
 # ─────────────────────────────────────────────────────────────────────
 
@@ -64,6 +65,21 @@ reqwest = { version = "0.12", features = ["json"] }
 
 # Temp files for proof verification
 tempfile = "3"
+
+# P2P networking
+libp2p = { version = "0.54", features = [
+    "tokio",
+    "gossipsub",
+    "mdns",
+    "noise",
+    "tcp",
+    "yamux",
+    "identify",
+    "macros",
+] }
+# Async channel for P2P ↔ node event passing
+tokio-stream = "0.1"
+futures = "0.3"
 
 [profile.release]
 opt-level = 3
