@@ -4,10 +4,10 @@
 *.docx
 probe/
 probe-grumpkin/
-obscura-website/
-obscura-hasher/
-obscura-tree/
-obscura-lib/
+tonkl-website/
+tonkl-hasher/
+tonkl-tree/
+tonkl-lib/
 node_modules/
 .env
 .env.*

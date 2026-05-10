@@ -1,0 +1,68 @@
+[package]
+name = "tonkl-prover"
+version = "0.1.0"
+edition = "2021"
+description = "In-process Noir witness solver for Tonkl Protocol. Reads circuit inputs from stdin JSON, solves the witness via ACVM, outputs witness.gz. sk never touches disk."
+
+# ─────────────────────────────────────────────────────────────────────
+# Direct ACVM approach — no noir_rs, no noirc_driver, no noir_fuzzer.
+#
+# Dependencies (all from Noir monorepo, same tag):
+#   acvm                   → ACVM solver (execute circuit, solve witness)
+#   noirc_abi              → Parse circuit ABI, convert JSON inputs to WitnessMap
+#   bn254_blackbox_solver  → Solve blackbox functions (Poseidon2, EC ops, etc.)
+#
+# Our circuit uses poseidon2_permutation (a blackbox function), so we
+# MUST use Bn254BlackBoxSolver — StubbedBlackBoxSolver would panic.
+# ─────────────────────────────────────────────────────────────────────
+
+[dependencies]
+# ACVM: the Noir virtual machine for witness solving
+acvm = { git = "https://github.com/noir-lang/noir.git", tag = "v1.0.0-beta.20" }
+
+# ABI: parse compiled circuit ABI, convert inputs to WitnessMap
+noirc_abi = { git = "https://github.com/noir-lang/noir.git", tag = "v1.0.0-beta.20" }
+
+# BN254 blackbox solver: Poseidon2, Grumpkin EC, Schnorr, etc.
+bn254_blackbox_solver = { git = "https://github.com/noir-lang/noir.git", tag = "v1.0.0-beta.20" }
+
+# Blackbox solver trait: needed to call poseidon2_permutation, multi_scalar_mul
+# directly for wallet-side hash computation (commitment, nullifier, derive_pk).
+acvm_blackbox_solver = { git = "https://github.com/noir-lang/noir.git", tag = "v1.0.0-beta.20" }
+
+# JSON input from stdin
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# Secure memory: zero sensitive buffers on drop
+zeroize = { version = "1", features = ["derive"] }
+
+# Witness serialization — we hand-roll msgpack bytes to guarantee
+# byte-exact parity with `nargo execute`'s witness.gz format. The
+# gzip wrapping is still done via flate2.
+flate2 = "1"
+
+# Base64 decoding for ACIR bytecode
+base64 = "0.22"
+
+# Large decimal → field conversion (for values > u128)
+num-bigint = "0.4"
+
+# Hex encoding for compute subcommand output
+hex = "0.4"
+
+# BLAKE3: circuit JSON hash check (compile-time bake + runtime compare).
+# Also used by the build script for the same hash computation.
+blake3 = "1"
+
+[build-dependencies]
+blake3 = "1"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+strip = true

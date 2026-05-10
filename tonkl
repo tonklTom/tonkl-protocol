@@ -16,11 +16,11 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-NODE_DIR="$SCRIPT_DIR/obscura-node"
-PROVER_DIR="$SCRIPT_DIR/obscura-prover"
+NODE_DIR="$SCRIPT_DIR/tonkl-node"
+PROVER_DIR="$SCRIPT_DIR/tonkl-prover"
 SCRIPTS_DIR="$NODE_DIR/scripts"
-NODE_BIN="$NODE_DIR/target/release/obscura-node"
-WALLET_SCRIPT="$SCRIPTS_DIR/obscura_wallet.py"
+NODE_BIN="$NODE_DIR/target/release/tonkl-node"
+WALLET_SCRIPT="$SCRIPTS_DIR/tonkl_wallet.py"
 TESTNET_SCRIPT="$SCRIPTS_DIR/launch_testnet.py"
 COMPOSE_FILE="$SCRIPT_DIR/docker-compose.yml"
 PYTHON="${TONKL_PYTHON:-python3}"

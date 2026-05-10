@@ -1,0 +1,86 @@
+[package]
+name = "tonkl-node"
+version = "0.2.0"
+edition = "2021"
+description = "Tonkl Protocol node with P2P networking, persistent state, mempool, proof verification, and JSON-RPC."
+
+# ─────────────────────────────────────────────────────────────────────
+# Phase B3: P2P Multi-Node Testnet
+#
+# This crate implements the full node infrastructure for Tonkl,
+# including P2P gossip for block and transaction propagation,
+# round-robin consensus, chain sync, and JSON-RPC.
+#
+# Architecture:
+#   State layer  → sled (embedded key-value store)
+#   Block format → bincode-serialized structs
+#   Mempool      → in-memory priority queue
+#   RPC          → JSON-RPC over HTTP (jsonrpsee)
+#   P2P          → libp2p (gossipsub + mDNS)
+#   Consensus    → round-robin leader rotation
+#   Proofs       → verified via bb (Barretenberg CLI)
+# ─────────────────────────────────────────────────────────────────────
+
+[dependencies]
+# Reuse cryptographic primitives from tonkl-prover
+tonkl-prover = { path = "../tonkl-prover" }
+
+# Embedded key-value store for persistent state
+sled = "0.34"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+bincode = "1"
+
+# Hex encoding
+hex = "0.4"
+
+# Hashing for bloom filter
+blake3 = "1"
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# JSON-RPC server
+jsonrpsee = { version = "0.24", features = ["server", "macros"] }
+
+# CORS middleware for JSON-RPC (localhost-only in alpha)
+tower = "0.4"
+tower-http = { version = "0.5", features = ["cors"] }
+http = "1"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Timestamps
+chrono = { version = "0.4", features = ["serde"] }
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# HTTP client for status command
+reqwest = { version = "0.12", features = ["json"] }
+
+# Temp files for proof verification
+tempfile = "3"
+
+# P2P networking
+libp2p = { version = "0.54", features = [
+    "tokio",
+    "gossipsub",
+    "mdns",
+    "noise",
+    "tcp",
+    "yamux",
+    "identify",
+    "macros",
+] }
+# Async channel for P2P ↔ node event passing
+tokio-stream = "0.1"
+futures = "0.3"
+
+[profile.release]
+opt-level = 3
+lto = "thin"

@@ -1,0 +1,14 @@
+[package]
+name = "tonkl_lib"
+type = "lib"
+authors = ["Tonkl Protocol"]
+compiler_version = ">=0.31.0"
+
+# Tonkl Shared Library
+# Exports: Note struct, commitment/nullifier/derive_pk, Poseidon2 hash
+# primitives, Merkle verification, and protocol constants.
+#
+# Used by: tonkl-transfer (2-in/2-out), tonkl-merge (N-in/1-out),
+#          tonkl-split (1-in/N-out), tonkl-mint (future).
+
+[dependencies]

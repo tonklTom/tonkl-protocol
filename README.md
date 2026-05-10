@@ -14,17 +14,17 @@ Tonkl is a UTXO-based blockchain where all transactions are shielded by default.
 tonkl/
   tonkl                CLI entry point (./tonkl testnet start, ./tonkl wallet, etc.)
   docker-compose.yml   Docker-based testnet quickstart
-  obscura-node/        Rust node: state tree, nullifier set, block builder, consensus, JSON-RPC
+  tonkl-node/        Rust node: state tree, nullifier set, block builder, consensus, JSON-RPC
     scripts/             Python wallet, testnet launcher, genesis, P2P, tests
     explorer/            Self-contained block explorer (HTML)
-  obscura-transfer/    Noir circuit: 2-in / 2-out private transfer
-  obscura-merge/       Noir circuit: 32-in / 1-out note merge
-  obscura-split/       Noir circuit: 1-in / 32-out note split
-  obscura-mint/        Noir circuit: 0-in / 32-out token mint
-  obscura-tree/        Noir circuit: Merkle tree verification
-  obscura-hasher/      Noir library: Poseidon2 hash function
-  obscura-prover/      Rust library: Poseidon2, Merkle tree, proof helpers
-  obscura-lib/         Shared Rust types
+  tonkl-transfer/    Noir circuit: 2-in / 2-out private transfer
+  tonkl-merge/       Noir circuit: 32-in / 1-out note merge
+  tonkl-split/       Noir circuit: 1-in / 32-out note split
+  tonkl-mint/        Noir circuit: 0-in / 32-out token mint
+  tonkl-tree/        Noir circuit: Merkle tree verification
+  tonkl-hasher/      Noir library: Poseidon2 hash function
+  tonkl-prover/      Rust library: Poseidon2, Merkle tree, proof helpers
+  tonkl-lib/         Shared Rust types
 ```
 
 **Cryptographic primitives:** Poseidon2 hash, BN254 curve, UltraHonk proving system (Barretenberg).
@@ -99,14 +99,14 @@ If you have Docker installed, you can skip the Rust build entirely:
 
 ```bash
 ./tonkl build
-# Or manually: cd obscura-node && cargo build --release
+# Or manually: cd tonkl-node && cargo build --release
 ```
 
 ### 2. Compile circuits and generate verification keys
 
 ```bash
 # Each circuit directory has a Nargo.toml
-for circuit in obscura-transfer obscura-merge obscura-split obscura-mint; do
+for circuit in tonkl-transfer tonkl-merge tonkl-split tonkl-mint; do
   cd $circuit
   nargo compile
   bb write_vk -b target/*.json -o target/vk
@@ -148,7 +148,7 @@ The first-run wizard walks you through database encryption, 24-word seed phrase 
 
 ### 7. Open the block explorer
 
-Open `obscura-node/explorer/index.html` in a browser and point it at your node URL (default: `http://127.0.0.1:9100`). The explorer features a unified search bar, live activity feed, chain statistics with TX type breakdowns, block navigation, dark/light themes, and a produce-block button for testnet usage. Press `Ctrl+K` to quick-search.
+Open `tonkl-node/explorer/index.html` in a browser and point it at your node URL (default: `http://127.0.0.1:9100`). The explorer features a unified search bar, live activity feed, chain statistics with TX type breakdowns, block navigation, dark/light themes, and a produce-block button for testnet usage. Press `Ctrl+K` to quick-search.
 
 ---
 
@@ -223,7 +223,7 @@ curl -s http://127.0.0.1:9100 \
 The integration test suite exercises the full stack — wallet operations, circuit proving, node RPC, P2P, and more:
 
 ```bash
-cd obscura-node
+cd tonkl-node
 python3 scripts/test_wallet_cli.py
 ```
 
@@ -237,15 +237,15 @@ This requires a built node binary, compiled circuits, and `nargo`/`bb` on PATH. 
 
 Each circuit lives in its own directory with a `Nargo.toml`:
 
-- **obscura-transfer** (2-in/2-out): The core private payment circuit. Proves that input notes exist in the Merkle tree, nullifiers are correctly derived, and output commitments are well-formed — all without revealing values or identities.
+- **tonkl-transfer** (2-in/2-out): The core private payment circuit. Proves that input notes exist in the Merkle tree, nullifiers are correctly derived, and output commitments are well-formed — all without revealing values or identities.
 
-- **obscura-merge** (32-in/1-out): Consolidates up to 32 notes into a single note. Unused inputs are padded with zero-value dummy notes.
+- **tonkl-merge** (32-in/1-out): Consolidates up to 32 notes into a single note. Unused inputs are padded with zero-value dummy notes.
 
-- **obscura-split** (1-in/32-out): Splits one note into up to 32 outputs. Unused outputs are zero-value padding.
+- **tonkl-split** (1-in/32-out): Splits one note into up to 32 outputs. Unused outputs are zero-value padding.
 
-- **obscura-mint** (0-in/32-out): Creates new notes from nothing. Requires an authority signature. Used for genesis funding and faucet operations.
+- **tonkl-mint** (0-in/32-out): Creates new notes from nothing. Requires an authority signature. Used for genesis funding and faucet operations.
 
-### Rust Node (`obscura-node/`)
+### Rust Node (`tonkl-node/`)
 
 - `state.rs` — Persistent Merkle tree (sled-backed, depth 32) and nullifier set
 - `block.rs` — Block format, block builder, and block validator with proof verification
@@ -255,9 +255,9 @@ Each circuit lives in its own directory with a `Nargo.toml`:
 - `consensus.rs` — Round-robin leader selection and automatic block production
 - `main.rs` — CLI entry point with `run` and `status` commands
 
-### Python Scripts (`obscura-node/scripts/`)
+### Python Scripts (`tonkl-node/scripts/`)
 
-- `obscura_wallet.py` — Full-featured wallet CLI with SQLite storage, BIP-39 seeds, SQLCipher encryption, auto-receive scanning, and multi-asset support
+- `tonkl_wallet.py` — Full-featured wallet CLI with SQLite storage, BIP-39 seeds, SQLCipher encryption, auto-receive scanning, and multi-asset support
 - `node_client.py` — JSON-RPC client for talking to the node
 - `witness_builder.py` — Builds circuit witnesses for all four circuit types
 - `genesis.py` — Genesis block generator with pre-funded faucet accounts
@@ -279,7 +279,7 @@ This is unaudited alpha software. Known limitations:
 - **SQLCipher encryption is optional.** Unencrypted wallets store spending keys in plaintext SQLite.
 - **No formal key management.** Spending keys are hex strings derived from BIP-39 seeds via HMAC-SHA512.
 
-See `Obscura_Security_Audit.docx` for a more detailed security analysis.
+See `Tonkl_Security_Audit.docx` for a more detailed security analysis.
 
 ---
 

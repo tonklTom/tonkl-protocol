@@ -1,0 +1,19 @@
+[package]
+name = "tonkl_transfer"
+type = "bin"
+authors = ["Tonkl Protocol"]
+compiler_version = ">=0.31.0"
+
+# Tonkl Transfer Circuit — v0.12
+# Implements the 2-in/2-out shielded transfer specified in Section 8.6
+# (MVP Phase 1 circuit scope). This is the only circuit that ships
+# in Phase 1; all other circuits gate behind independent audit + 67%
+# supermajority vote.
+#
+# Backend targets:
+#   Phase 1   → Barretenberg (Groth16 via bb backend)
+#   Phase 1b  → Halo2 IPA (migration is a compiler flag change, §8.3)
+#   Tracked   → Plonky3 (activate when performance target met, §8.4)
+
+[dependencies]
+tonkl_lib = { path = "../tonkl-lib" }

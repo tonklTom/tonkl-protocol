@@ -1,0 +1,21 @@
+[package]
+name = "tonkl_merge"
+type = "bin"
+authors = ["Tonkl Protocol"]
+compiler_version = ">=0.31.0"
+
+# Tonkl Merge Circuit — 32-in/1-out (production)
+#
+# Consolidates up to 32 notes owned by the same spending key into a single
+# output note. This is a wallet-maintenance operation: the sender and
+# receiver are the same party. For fewer than 32 real notes, pad with
+# zero-value notes to avoid leaking the actual input count.
+#
+# Whitepaper refs:
+#   Section 7.5 - Enforced output templates (32-in/1-out merge)
+#   Section 7.6 - Merge obligation bands
+#   Section 8.3 - Noir as unified circuit DSL
+#   Section 8.6 - MVP Phase 1 circuit scope
+
+[dependencies]
+tonkl_lib = { path = "../tonkl-lib" }

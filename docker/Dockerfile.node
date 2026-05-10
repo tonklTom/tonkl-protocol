@@ -7,11 +7,11 @@ FROM rust:1.78-bookworm AS builder
 WORKDIR /build
 
 # Copy workspace
-COPY obscura-prover/ obscura-prover/
-COPY obscura-node/ obscura-node/
+COPY tonkl-prover/ tonkl-prover/
+COPY tonkl-node/ tonkl-node/
 
 # Build release binary
-RUN cd obscura-node && cargo build --release
+RUN cd tonkl-node && cargo build --release
 
 # ─── Runtime stage ────────────────────────────────────────────────
 FROM debian:bookworm-slim
@@ -23,21 +23,21 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /tonkl
 
 # Copy node binary
-COPY --from=builder /build/obscura-node/target/release/obscura-node /usr/local/bin/obscura-node
+COPY --from=builder /build/tonkl-node/target/release/tonkl-node /usr/local/bin/tonkl-node
 
 # Copy Python scripts
-COPY obscura-node/scripts/ scripts/
+COPY tonkl-node/scripts/ scripts/
 
 # Copy circuit artifacts (VKs) if available
-COPY obscura-transfer/target/ circuits/transfer/
-COPY obscura-split/target/ circuits/split/
-COPY obscura-merge/target/ circuits/merge/
-COPY obscura-mint/target/ circuits/mint/
+COPY tonkl-transfer/target/ circuits/transfer/
+COPY tonkl-split/target/ circuits/split/
+COPY tonkl-merge/target/ circuits/merge/
+COPY tonkl-mint/target/ circuits/mint/
 
 # Default data directory
 RUN mkdir -p /tonkl/data
 
 EXPOSE 9100 9150
 
-ENTRYPOINT ["obscura-node"]
+ENTRYPOINT ["tonkl-node"]
 CMD ["run", "--bind", "0.0.0.0", "--port", "9100", "--data-dir", "/tonkl/data"]

@@ -2,8 +2,8 @@
 target/
 **/*.rs.bk
 Cargo.lock
-# Keep Cargo.lock in workspace subcrates that are binaries (obscura-node)
-!obscura-node/Cargo.lock
+# Keep Cargo.lock in workspace subcrates that are binaries (tonkl-node)
+!tonkl-node/Cargo.lock
 
 # ─── Noir (ZK circuits) ─────────────────────────────
 **/target/
@@ -13,7 +13,6 @@ Cargo.lock
 !**/Verifier.toml  # These are checked in as test fixtures
 
 # ─── Testnet runtime data ────────────────────────────
-obscura-data/
 tonkl-data/
 testnet.json
 *.db

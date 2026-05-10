@@ -1,0 +1,13 @@
+[package]
+name = "tonkl_hasher"
+type = "bin"
+authors = ["Tonkl Protocol"]
+compiler_version = ">=0.31.0"
+
+# Hash oracle — computes note commitments, nullifiers, and Merkle root
+# from raw note data. Used by generate_witness.py to produce valid
+# Prover.toml values for the main tonkl_transfer circuit.
+# Run: nargo execute  (outputs values to target/tonkl_hasher.gz)
+# Then: python3 ../tonkl-transfer/scripts/generate_witness.py
+
+[dependencies]
