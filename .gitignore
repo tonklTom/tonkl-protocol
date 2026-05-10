@@ -58,3 +58,4 @@ venv/
 *.so
 *.dylib
 *.dll
+tonkl-node/obscura-data/
