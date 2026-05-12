@@ -4,10 +4,10 @@
 //
 // Protocols:
 //   - Gossipsub: transaction and block propagation to all peers
-//   - mDNS: automatic local peer discovery (for testnet convenience)
+//   - mDNS: optional local peer discovery (explicit local-dev mode only)
 //   - Identify: peer metadata exchange
 //
-// Chain sync uses the existing JSON-RPC interface (get_block method),
+// Chain sync uses the existing JSON-RPC interface (get_blocks_range method),
 // not the P2P layer, which keeps the implementation simple.
 //
 // Architecture:
@@ -23,8 +23,10 @@ use crate::block::{Block, Transaction};
 
 use futures::StreamExt;
 use libp2p::{
-    gossipsub, identify, mdns, noise,
-    swarm::{NetworkBehaviour, SwarmEvent},
+    gossipsub, identify, mdns,
+    multiaddr::Protocol,
+    noise,
+    swarm::{behaviour::toggle::Toggle, NetworkBehaviour, SwarmEvent},
     tcp, yamux, Multiaddr, PeerId, Swarm,
 };
 use serde::{Deserialize, Serialize};
@@ -53,7 +55,7 @@ pub enum GossipMessage {
 #[derive(NetworkBehaviour)]
 pub struct TonklBehaviour {
     pub gossipsub: gossipsub::Behaviour,
-    pub mdns: mdns::tokio::Behaviour,
+    pub mdns: Toggle<mdns::tokio::Behaviour>,
     pub identify: identify::Behaviour,
 }
 
@@ -94,10 +96,14 @@ pub enum NetworkEvent {
 /// Configuration for the P2P network layer.
 #[derive(Debug, Clone)]
 pub struct P2pConfig {
-    /// Port to listen on for P2P connections.
-    pub listen_port: u16,
+    /// Address to listen on for P2P connections.
+    pub listen_addr: Multiaddr,
     /// Bootstrap peer addresses to connect to on startup.
     pub bootstrap_peers: Vec<Multiaddr>,
+    /// Explicitly trusted peer IDs. Required outside local mDNS mode.
+    pub trusted_peers: HashSet<PeerId>,
+    /// Enable mDNS peer discovery. Local development only.
+    pub allow_mdns_discovery: bool,
     /// Node ID string (used in identify protocol).
     pub node_id: String,
 }
@@ -105,8 +111,12 @@ pub struct P2pConfig {
 impl Default for P2pConfig {
     fn default() -> Self {
         Self {
-            listen_port: 9200,
+            listen_addr: "/ip4/127.0.0.1/tcp/9200"
+                .parse()
+                .expect("default P2P multiaddr is valid"),
             bootstrap_peers: Vec::new(),
+            trusted_peers: HashSet::new(),
+            allow_mdns_discovery: false,
             node_id: "tonkl-node".to_string(),
         }
     }
@@ -119,6 +129,17 @@ impl Default for P2pConfig {
 const TX_TOPIC: &str = "tonkl/txs/1";
 const BLOCK_TOPIC: &str = "tonkl/blocks/1";
 
+pub fn peer_id_from_multiaddr(addr: &Multiaddr) -> Option<PeerId> {
+    addr.iter().find_map(|protocol| match protocol {
+        Protocol::P2p(peer_id) => Some(peer_id),
+        _ => None,
+    })
+}
+
+fn peer_is_trusted(config: &P2pConfig, trusted_peers: &HashSet<PeerId>, peer_id: &PeerId) -> bool {
+    config.allow_mdns_discovery || trusted_peers.contains(peer_id)
+}
+
 // ─────────────────────────────────────────────────────────────────────
 // Build the swarm
 // ─────────────────────────────────────────────────────────────────────
@@ -129,19 +150,20 @@ const BLOCK_TOPIC: &str = "tonkl/blocks/1";
 pub fn build_swarm(
     config: &P2pConfig,
 ) -> Result<(Swarm<TonklBehaviour>, PeerId), Box<dyn std::error::Error>> {
-    // Gossipsub config
-    let gossipsub_config = gossipsub::ConfigBuilder::default()
-        .heartbeat_interval(Duration::from_secs(1))
-        .validation_mode(gossipsub::ValidationMode::Strict)
-        .max_transmit_size(10 * 1024 * 1024) // 10 MB — blocks can be large
-        .build()
-        .map_err(|e| format!("gossipsub config error: {}", e))?;
-
+    // Gossipsub config — message_id_fn is set on the config in libp2p 0.54
     let message_id_fn = |message: &gossipsub::Message| {
         // Use BLAKE3 of the data as message ID for deduplication
         let hash = blake3::hash(&message.data);
         gossipsub::MessageId::from(hash.as_bytes().to_vec())
     };
+
+    let gossipsub_config = gossipsub::ConfigBuilder::default()
+        .heartbeat_interval(Duration::from_secs(1))
+        .validation_mode(gossipsub::ValidationMode::Strict)
+        .max_transmit_size(10 * 1024 * 1024) // 10 MB — blocks can be large
+        .message_id_fn(message_id_fn)
+        .build()
+        .map_err(|e| format!("gossipsub config error: {}", e))?;
 
     let swarm = libp2p::SwarmBuilder::with_new_identity()
         .with_tokio()
@@ -154,18 +176,22 @@ pub fn build_swarm(
             let peer_id = keypair.public().to_peer_id();
 
             // Gossipsub
-            let gossipsub = gossipsub::Behaviour::new_with_message_authenticity(
+            let gossipsub = gossipsub::Behaviour::new(
                 gossipsub::MessageAuthenticity::Signed(keypair.clone()),
                 gossipsub_config.clone(),
-                message_id_fn,
             )
             .map_err(|e| format!("gossipsub error: {}", e))?;
 
-            // mDNS for local discovery
-            let mdns = mdns::tokio::Behaviour::new(
-                mdns::Config::default(),
-                peer_id,
-            )?;
+            // mDNS is constructed only for explicit local discovery mode.
+            let mdns = if config.allow_mdns_discovery {
+                Some(mdns::tokio::Behaviour::new(
+                    mdns::Config::default(),
+                    peer_id,
+                )?)
+            } else {
+                None
+            }
+            .into();
 
             // Identify protocol
             let identify = identify::Behaviour::new(identify::Config::new(
@@ -179,9 +205,7 @@ pub fn build_swarm(
                 identify,
             })
         })?
-        .with_swarm_config(|cfg| {
-            cfg.with_idle_connection_timeout(Duration::from_secs(300))
-        })
+        .with_swarm_config(|cfg| cfg.with_idle_connection_timeout(Duration::from_secs(300)))
         .build();
 
     let local_peer_id = *swarm.local_peer_id();
@@ -219,18 +243,27 @@ pub async fn run_p2p(
     }
 
     // Listen on TCP
-    let listen_addr: Multiaddr = format!("/ip4/0.0.0.0/tcp/{}", config.listen_port)
-        .parse()
-        .expect("valid multiaddr");
-
-    if let Err(e) = swarm.listen_on(listen_addr.clone()) {
-        error!("Failed to listen on {}: {}", listen_addr, e);
+    if let Err(e) = swarm.listen_on(config.listen_addr.clone()) {
+        error!("Failed to listen on {}: {}", config.listen_addr, e);
         return;
     }
-    info!("P2P listening on /ip4/0.0.0.0/tcp/{}", config.listen_port);
+    info!("P2P listening on {}", config.listen_addr);
+
+    if config.allow_mdns_discovery {
+        info!("P2P mDNS discovery enabled for local development");
+    } else {
+        info!(
+            "P2P strict peer mode enabled ({} trusted peer IDs)",
+            config.trusted_peers.len()
+        );
+    }
 
     // Connect to bootstrap peers
+    let mut trusted_peers = config.trusted_peers.clone();
     for addr in &config.bootstrap_peers {
+        if let Some(peer_id) = peer_id_from_multiaddr(addr) {
+            trusted_peers.insert(peer_id);
+        }
         info!("Dialing bootstrap peer: {}", addr);
         if let Err(e) = swarm.dial(addr.clone()) {
             warn!("Failed to dial {}: {}", addr, e);
@@ -247,14 +280,22 @@ pub async fn run_p2p(
             event = swarm.select_next_some() => {
                 match event {
                     SwarmEvent::Behaviour(TonklBehaviourEvent::Gossipsub(
-                        gossipsub::Event::Message { message, .. }
+                        gossipsub::Event::Message { propagation_source, message, .. }
                     )) => {
-                        handle_gossip_message(&message, &event_tx).await;
+                        if peer_is_trusted(&config, &trusted_peers, &propagation_source) {
+                            handle_gossip_message(&message, &event_tx).await;
+                        } else {
+                            warn!("Dropped gossip message from untrusted peer {}", propagation_source);
+                        }
                     }
 
                     SwarmEvent::Behaviour(TonklBehaviourEvent::Mdns(
                         mdns::Event::Discovered(peers)
                     )) => {
+                        if !config.allow_mdns_discovery {
+                            debug!("Ignoring mDNS discovery because local discovery is disabled");
+                            continue;
+                        }
                         for (peer_id, addr) in peers {
                             debug!("mDNS discovered peer: {} at {}", peer_id, addr);
                             swarm.behaviour_mut().gossipsub.add_explicit_peer(&peer_id);
@@ -267,6 +308,9 @@ pub async fn run_p2p(
                     SwarmEvent::Behaviour(TonklBehaviourEvent::Mdns(
                         mdns::Event::Expired(peers)
                     )) => {
+                        if !config.allow_mdns_discovery {
+                            continue;
+                        }
                         for (peer_id, _addr) in peers {
                             debug!("mDNS peer expired: {}", peer_id);
                             swarm.behaviour_mut().gossipsub.remove_explicit_peer(&peer_id);
@@ -329,6 +373,17 @@ pub async fn run_p2p(
                     }
 
                     Some(NetworkCommand::DialPeer(addr)) => {
+                        if !config.allow_mdns_discovery {
+                            match peer_id_from_multiaddr(&addr) {
+                                Some(peer_id) => {
+                                    trusted_peers.insert(peer_id);
+                                }
+                                None => {
+                                    warn!("Refusing to dial peer without /p2p/<peer-id> in strict mode: {}", addr);
+                                    continue;
+                                }
+                            }
+                        }
                         info!("Dialing peer: {}", addr);
                         if let Err(e) = swarm.dial(addr.clone()) {
                             warn!("Failed to dial {}: {}", addr, e);

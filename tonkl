@@ -18,8 +18,10 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 NODE_DIR="$SCRIPT_DIR/tonkl-node"
 PROVER_DIR="$SCRIPT_DIR/tonkl-prover"
+TRANSFER_DIR="$SCRIPT_DIR/tonkl-transfer"
 SCRIPTS_DIR="$NODE_DIR/scripts"
 NODE_BIN="$NODE_DIR/target/release/tonkl-node"
+TRANSFER_CIRCUIT_JSON="$TRANSFER_DIR/target/tonkl_transfer.json"
 WALLET_SCRIPT="$SCRIPTS_DIR/tonkl_wallet.py"
 TESTNET_SCRIPT="$SCRIPTS_DIR/launch_testnet.py"
 COMPOSE_FILE="$SCRIPT_DIR/docker-compose.yml"
@@ -112,6 +114,14 @@ cmd_doctor() {
         _info "Run: ./tonkl build  (or use --docker to skip)"
     fi
 
+    # Transfer circuit artifact needed for prover hash binding
+    if [[ -f "$TRANSFER_CIRCUIT_JSON" ]]; then
+        _ok "Transfer circuit artifact found"
+    else
+        _warn "Transfer circuit artifact missing"
+        _info "Run: cd tonkl-transfer && nargo compile"
+    fi
+
     echo ""
     if $ok; then
         _ok "All core prerequisites met"
@@ -126,6 +136,19 @@ cmd_build() {
     _banner
     echo -e "  ${BOLD}Building Tonkl from source...${NC}"
     echo ""
+
+    # Compile the transfer circuit first: tonkl-prover bakes its BLAKE3 hash
+    # into the binary and now fails closed if the artifact is missing.
+    if [[ ! -f "$TRANSFER_CIRCUIT_JSON" ]]; then
+        if ! command -v nargo &>/dev/null; then
+            _fail "nargo not found — needed to compile $TRANSFER_CIRCUIT_JSON"
+            _info "Install Noir, then run: cd tonkl-transfer && nargo compile"
+            exit 1
+        fi
+        _info "Compiling transfer circuit for prover hash binding..."
+        (cd "$TRANSFER_DIR" && nargo compile >/dev/null)
+        _ok "Transfer circuit compiled"
+    fi
 
     # Build prover
     if [[ -d "$PROVER_DIR" ]]; then
@@ -223,6 +246,17 @@ cmd_testnet_docker() {
         exit 1
     fi
 
+    if [[ ! -f "$TRANSFER_CIRCUIT_JSON" ]]; then
+        if ! command -v nargo &>/dev/null; then
+            _fail "Transfer circuit artifact missing and nargo is not installed."
+            _info "Run: cd tonkl-transfer && nargo compile"
+            exit 1
+        fi
+        _info "Compiling transfer circuit for Docker build hash binding..."
+        (cd "$TRANSFER_DIR" && nargo compile >/dev/null)
+        _ok "Transfer circuit compiled"
+    fi
+
     _info "Building and starting containers..."
     echo ""
 
@@ -279,7 +313,9 @@ cmd_node() {
             ;;
 
         *)
-            echo "Usage: tonkl node run [--port PORT] [--data-dir DIR] [--vk-dir DIR]"
+            echo "Usage: tonkl node run --vk-dir DIR [--port PORT] [--data-dir DIR]"
+            echo "       TONKL_RPC_SECRET=... tonkl node run --vk-dir DIR [--p2p-port PORT --trusted-peer PEER_ID]"
+            echo "       tonkl node run --allow-unverified-local --allow-unauthenticated-rpc-local [--port PORT] [--data-dir DIR]"
             echo "       tonkl node status"
             exit 1
             ;;

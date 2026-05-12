@@ -91,6 +91,10 @@ If you have Docker installed, you can skip the Rust build entirely:
 ./tonkl testnet start --docker
 ```
 
+Docker builds still require the compiled transfer circuit artifact used for
+prover hash binding. `./tonkl testnet start --docker` will create it with
+`nargo compile` if it is missing.
+
 ---
 
 ## Quick Start (full details)
@@ -100,6 +104,14 @@ If you have Docker installed, you can skip the Rust build entirely:
 ```bash
 ./tonkl build
 # Or manually: cd tonkl-node && cargo build --release
+```
+
+`tonkl-prover` binds itself to the compiled transfer circuit hash at build time.
+If you build manually from a clean checkout, compile the transfer circuit first:
+
+```bash
+cd tonkl-transfer && nargo compile
+cd ../tonkl-node && cargo build --release
 ```
 
 ### 2. Compile circuits and generate verification keys
@@ -197,16 +209,22 @@ Run `./tonkl wallet --help` for full usage.
 
 The node exposes a JSON-RPC 2.0 interface over HTTP. Default port: 9100.
 
+Set `TONKL_RPC_SECRET` for beta/public nodes. Write methods require it by
+default, and metadata-heavy read methods require it unless the node is started
+with the explicit `--allow-public-rpc-metadata` explorer override.
+
 | Method | Description |
 |--------|-------------|
-| `get_status` | Chain height, Merkle root, leaf count, mempool size |
-| `submit_tx` | Submit a shielded transaction with proof |
-| `produce_block` | Mine the next block from the mempool |
-| `get_block` | Retrieve a block by number |
-| `get_merkle_proof` | Get a Merkle inclusion proof for a leaf index |
-| `get_nullifiers` | Check if nullifiers have been spent |
-| `get_encrypted_notes` | Retrieve encrypted notes for scanning |
-| `store_encrypted_notes` | Store encrypted notes for recipients |
+| `get_status` | Public chain height, Merkle root, leaf count, mempool size |
+| `get_merkle_root` | Public Merkle root |
+| `submit_tx` | Submit a shielded transaction with proof; requires secret |
+| `produce_block` | Mine the next block from the mempool; requires secret |
+| `store_encrypted_notes` | Store encrypted notes for recipients; requires secret |
+| `get_block` | Retrieve a block by number; protected metadata read |
+| `get_blocks_range` | Retrieve block batches for sync; protected metadata read |
+| `get_merkle_proof` | Get a Merkle inclusion proof for a leaf index; protected metadata read |
+| `get_nullifier_status` | Check if a nullifier has been spent; protected metadata read |
+| `get_encrypted_notes` | Retrieve encrypted notes for scanning; protected metadata read |
 
 Example:
 

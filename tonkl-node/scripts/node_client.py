@@ -10,6 +10,7 @@ Usage:
 
     client = TonklClient()                       # default: http://127.0.0.1:9100
     client = TonklClient("http://localhost:9200") # custom URL
+    # If TONKL_RPC_SECRET is set, write and protected read RPCs include it automatically.
 
     # Query state
     status = client.get_status()
@@ -135,6 +136,7 @@ class TonklClient:
         timeout: float = 30.0,
         max_retries: int = 3,
         retry_delay: float = 1.0,
+        rpc_secret: Optional[str] = None,
     ):
         """
         Args:
@@ -142,11 +144,15 @@ class TonklClient:
             timeout: Request timeout in seconds per attempt
             max_retries: Max retries on transient connection failures
             retry_delay: Base delay between retries (doubles each attempt)
+            rpc_secret: Optional secret for write and protected read RPCs. Defaults to TONKL_RPC_SECRET.
         """
         self.url = url.rstrip("/")
         self.timeout = timeout
         self.max_retries = max_retries
         self.retry_delay = retry_delay
+        if rpc_secret is None:
+            rpc_secret = os.environ.get("TONKL_RPC_SECRET")
+        self.rpc_secret = rpc_secret.strip() if rpc_secret and rpc_secret.strip() else None
         self._next_id = 1
 
     def ping(self) -> bool:
@@ -219,6 +225,18 @@ class TonklClient:
                 raise  # don't retry application-level errors
         raise last_err  # type: ignore[misc]
 
+    def _write_params(self, *params: Any) -> List[Any]:
+        values = list(params)
+        if self.rpc_secret:
+            values.append(self.rpc_secret)
+        return values
+
+    def _read_params(self, *params: Any) -> List[Any]:
+        values = list(params)
+        if self.rpc_secret:
+            values.append(self.rpc_secret)
+        return values
+
     # ─────────────────────────────────────────────────────────────────
     # Query Methods
     # ─────────────────────────────────────────────────────────────────
@@ -245,7 +263,7 @@ class TonklClient:
         Returns index_bits (LSB-first) and sibling hashes, ready for
         use as circuit witness inputs.
         """
-        r = self._call_with_retry("get_merkle_proof", [index])
+        r = self._call_with_retry("get_merkle_proof", self._read_params(index))
         return MerkleProof(
             index=r["index"],
             index_bits=r["index_bits"],
@@ -262,7 +280,7 @@ class TonklClient:
         Returns:
             True if the nullifier is spent, False otherwise.
         """
-        return self._call_with_retry("get_nullifier_status", [nullifier])
+        return self._call_with_retry("get_nullifier_status", self._read_params(nullifier))
 
     def get_tx_status(self, tx_hash: str) -> TxStatus:
         """
@@ -290,7 +308,7 @@ class TonklClient:
         Returns the full block (header + transactions) as a dict,
         or None if the block doesn't exist.
         """
-        return self._call_with_retry("get_block", [block_number])
+        return self._call_with_retry("get_block", self._read_params(block_number))
 
     # ─────────────────────────────────────────────────────────────────
     # Transaction Submission
@@ -348,7 +366,7 @@ class TonklClient:
             "asset_id": asset_id,
         }
 
-        r = self._call("submit_tx", [request])
+        r = self._call("submit_tx", self._write_params(request))
         return SubmitTxResult(
             tx_hash=r["tx_hash"],
             accepted=r["accepted"],
@@ -411,7 +429,7 @@ class TonklClient:
 
         Drains the mempool and produces a new block.
         """
-        r = self._call("produce_block")
+        r = self._call("produce_block", self._write_params())
         return BlockHeader(
             block_number=r["block_number"],
             parent_hash=r["parent_hash"],
@@ -438,7 +456,7 @@ class TonklClient:
             Number of notes stored.
         """
         request = {"notes": notes}
-        r = self._call("store_encrypted_notes", [request])
+        r = self._call("store_encrypted_notes", self._write_params(request))
         return r["stored"]
 
     def get_encrypted_notes(
@@ -456,7 +474,7 @@ class TonklClient:
         Returns:
             {"notes": [{"leaf_index": int, "ciphertext": hex}], "leaf_count": int}
         """
-        r = self._call_with_retry("get_encrypted_notes", [from_index, count])
+        r = self._call_with_retry("get_encrypted_notes", self._read_params(from_index, count))
         return {
             "notes": r["notes"],
             "leaf_count": r["leaf_count"],

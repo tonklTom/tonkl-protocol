@@ -3,7 +3,9 @@
 // Multi-node testnet with P2P networking, consensus, and proof verification.
 //
 // Usage:
-//   tonkl-node run                                    # Start solo node (auto blocks every 5s)
+//   tonkl-node run --allow-unverified-local \
+//       --allow-unauthenticated-rpc-local             # Local-only dev node without VKs/auth
+//   tonkl-node run                                    # Start solo node (requires VKs)
 //   tonkl-node run --vk-dir ./vks                     # With proof verification
 //   tonkl-node run --port 9200                        # Custom RPC port
 //   tonkl-node run --data-dir ./db                    # Custom data directory
@@ -12,24 +14,230 @@
 //       --validators node-0,node-1,node-2             # Multi-validator round-robin
 //   tonkl-node run --block-interval 3                 # Faster blocks (3s)
 //   tonkl-node run --p2p-port 9300 \
-//       --bootstrap /ip4/127.0.0.1/tcp/9300           # P2P networking
+//       --bootstrap /ip4/127.0.0.1/tcp/9300/p2p/<id>  # Strict P2P networking
+//   tonkl-node run --p2p-port 9300 --allow-mdns-local # Local-only P2P discovery
 //   tonkl-node run --sync-from http://127.0.0.1:9100  # Sync from existing peer
 //   tonkl-node status                                 # Query running node status
 
 use clap::{Parser, Subcommand};
+use libp2p::{Multiaddr, PeerId};
+use std::collections::HashSet;
+use std::net::{IpAddr, Ipv4Addr};
+use std::path::PathBuf;
+use std::sync::Arc;
+use tokio::sync::{mpsc, RwLock};
 use tonkl_node::block::{Block, BlockBuilder, Transaction};
 use tonkl_node::consensus::{ConsensusConfig, ValidatorId, ValidatorSet};
 use tonkl_node::mempool::Mempool;
 use tonkl_node::node;
 use tonkl_node::p2p::{self, NetworkCommand, NetworkEvent, P2pConfig};
-use tonkl_node::rpc::{start_rpc_server, NodeState};
+use tonkl_node::rpc::{start_rpc_server, MintPolicy, NodeState};
 use tonkl_node::state::{ChainMeta, EncryptedNoteStore, NoteTree, NullifierSet};
 use tonkl_node::verifier::ProofVerifier;
-use std::path::PathBuf;
-use std::sync::Arc;
-use tokio::sync::{mpsc, RwLock};
 use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
+
+fn is_loopback_bind(bind: &str) -> bool {
+    let bind = bind.trim();
+    if bind.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+    bind.parse::<std::net::IpAddr>()
+        .map(|addr| addr.is_loopback())
+        .unwrap_or(false)
+}
+
+fn is_beta_or_production_env(tonkl_env: Option<&str>) -> bool {
+    tonkl_env
+        .map(|value| {
+            let value = value.trim().to_ascii_lowercase();
+            value == "production" || value == "prod" || value == "beta"
+        })
+        .unwrap_or(false)
+}
+
+fn parse_p2p_bind_addr(bind: &str, port: u16) -> Result<Multiaddr, String> {
+    let ip = if bind.trim().eq_ignore_ascii_case("localhost") {
+        IpAddr::V4(Ipv4Addr::LOCALHOST)
+    } else {
+        bind.trim()
+            .parse::<IpAddr>()
+            .map_err(|e| format!("invalid P2P bind address '{}': {}", bind, e))?
+    };
+
+    let multiaddr = match ip {
+        IpAddr::V4(addr) => format!("/ip4/{}/tcp/{}", addr, port),
+        IpAddr::V6(addr) => format!("/ip6/{}/tcp/{}", addr, port),
+    };
+    multiaddr
+        .parse()
+        .map_err(|e| format!("invalid P2P listen multiaddr '{}': {}", multiaddr, e))
+}
+
+fn parse_bootstrap_peers(raw_peers: Option<Vec<String>>) -> Result<Vec<Multiaddr>, String> {
+    raw_peers
+        .unwrap_or_default()
+        .into_iter()
+        .map(|peer| {
+            peer.parse::<Multiaddr>()
+                .map_err(|e| format!("invalid bootstrap peer '{}': {}", peer, e))
+        })
+        .collect()
+}
+
+fn parse_trusted_peers(raw_peers: Option<Vec<String>>) -> Result<HashSet<PeerId>, String> {
+    let mut trusted = HashSet::new();
+    for peer in raw_peers.unwrap_or_default() {
+        let peer_id = peer
+            .parse::<PeerId>()
+            .map_err(|e| format!("invalid trusted peer ID '{}': {}", peer, e))?;
+        trusted.insert(peer_id);
+    }
+    Ok(trusted)
+}
+
+fn validate_p2p_config(
+    p2p_enabled: bool,
+    allow_mdns_local: bool,
+    p2p_bind: &str,
+    bootstrap_peers: &[Multiaddr],
+    trusted_peers: &HashSet<PeerId>,
+    tonkl_env: Option<&str>,
+) -> Result<(), String> {
+    if !p2p_enabled {
+        return Ok(());
+    }
+
+    if allow_mdns_local {
+        if is_beta_or_production_env(tonkl_env) {
+            return Err(
+                "mDNS peer discovery is not allowed when TONKL_ENV is beta/production".to_string(),
+            );
+        }
+        if !is_loopback_bind(p2p_bind) {
+            return Err(format!(
+                "mDNS peer discovery requires loopback P2P bind, got {}",
+                p2p_bind
+            ));
+        }
+        return Ok(());
+    }
+
+    if bootstrap_peers
+        .iter()
+        .any(|addr| p2p::peer_id_from_multiaddr(addr).is_none())
+    {
+        return Err(
+            "strict P2P mode requires every bootstrap multiaddr to include /p2p/<peer-id>; use --allow-mdns-local only for local development"
+                .to_string(),
+        );
+    }
+
+    let mut allowed_peers = trusted_peers.clone();
+    for addr in bootstrap_peers {
+        if let Some(peer_id) = p2p::peer_id_from_multiaddr(addr) {
+            allowed_peers.insert(peer_id);
+        }
+    }
+
+    if allowed_peers.is_empty() {
+        return Err(
+            "strict P2P mode requires --trusted-peer or bootstrap multiaddrs containing /p2p/<peer-id>; use --allow-mdns-local only for local development"
+                .to_string(),
+        );
+    }
+
+    Ok(())
+}
+
+fn validate_unverified_mode_allowed(
+    allow_unverified_local: bool,
+    bind: &str,
+    p2p_port: u16,
+    sync_from: Option<&str>,
+    tonkl_env: Option<&str>,
+) -> Result<(), String> {
+    if !allow_unverified_local {
+        return Err(
+            "proof verification requires --vk-dir; use --allow-unverified-local only for isolated local development"
+                .to_string(),
+        );
+    }
+
+    if is_beta_or_production_env(tonkl_env) {
+        return Err(
+            "unverified local mode is not allowed when TONKL_ENV is beta/production".to_string(),
+        );
+    }
+
+    if !is_loopback_bind(bind) {
+        return Err(format!(
+            "unverified local mode requires loopback bind, got {}",
+            bind
+        ));
+    }
+
+    if p2p_port > 0 {
+        return Err("unverified local mode cannot enable P2P".to_string());
+    }
+
+    if sync_from.is_some() {
+        return Err("unverified local mode cannot sync blocks from a peer".to_string());
+    }
+
+    Ok(())
+}
+
+fn env_value_present(name: &str) -> bool {
+    std::env::var(name)
+        .ok()
+        .map(|value| !value.trim().is_empty())
+        .unwrap_or(false)
+}
+
+fn validate_rpc_auth_allowed(
+    allow_unauthenticated_rpc_local: bool,
+    bind: &str,
+    p2p_port: u16,
+    sync_from: Option<&str>,
+    tonkl_env: Option<&str>,
+    rpc_secret_configured: bool,
+) -> Result<(), String> {
+    if allow_unauthenticated_rpc_local {
+        if is_beta_or_production_env(tonkl_env) {
+            return Err(
+                "unauthenticated RPC local mode is not allowed when TONKL_ENV is beta/production"
+                    .to_string(),
+            );
+        }
+
+        if !is_loopback_bind(bind) {
+            return Err(format!(
+                "unauthenticated RPC local mode requires loopback bind, got {}",
+                bind
+            ));
+        }
+
+        if p2p_port > 0 {
+            return Err("unauthenticated RPC local mode cannot enable P2P".to_string());
+        }
+
+        if sync_from.is_some() {
+            return Err(
+                "unauthenticated RPC local mode cannot sync blocks from a peer".to_string(),
+            );
+        }
+    }
+
+    if rpc_secret_configured || allow_unauthenticated_rpc_local {
+        return Ok(());
+    }
+
+    Err(
+        "TONKL_RPC_SECRET is required for write RPC methods; use --allow-unauthenticated-rpc-local only for isolated local development"
+            .to_string(),
+    )
+}
 
 #[derive(Parser)]
 #[command(name = "tonkl-node")]
@@ -61,9 +269,14 @@ enum Commands {
 
         /// Directory containing verification keys (enables proof verification).
         /// Expected layout: vk_dir/{transfer,merge,split,mint}/vk
-        /// If omitted, proof verification is disabled (testnet mode).
+        /// If omitted, startup fails unless --allow-unverified-local is set.
         #[arg(long)]
         vk_dir: Option<PathBuf>,
+
+        /// Allow no-VK mode for isolated loopback development only.
+        /// Rejected with P2P, sync, non-loopback bind, or beta/production env.
+        #[arg(long)]
+        allow_unverified_local: bool,
 
         /// Path to the bb (Barretenberg) binary
         #[arg(long, default_value = "bb")]
@@ -86,15 +299,37 @@ enum Commands {
         #[arg(long)]
         no_auto_blocks: bool,
 
+        /// Allow write RPCs without TONKL_RPC_SECRET for isolated loopback development only.
+        /// Rejected with P2P, sync, non-loopback bind, or beta/production env.
+        #[arg(long)]
+        allow_unauthenticated_rpc_local: bool,
+
+        /// Allow metadata-heavy read RPCs without TONKL_RPC_SECRET.
+        /// Intended for explicit public explorer deployments or isolated local dev.
+        #[arg(long)]
+        allow_public_rpc_metadata: bool,
+
         // ── P2P options ────────────────────────────────────────
         /// P2P listen port (0 = disabled)
         #[arg(long, default_value = "0")]
         p2p_port: u16,
 
+        /// P2P bind address
+        #[arg(long, default_value = "127.0.0.1")]
+        p2p_bind: String,
+
         /// Bootstrap peer addresses (multiaddr format).
-        /// Example: --bootstrap /ip4/127.0.0.1/tcp/9300
+        /// Strict mode requires /p2p/<peer-id> in each address.
         #[arg(long = "bootstrap", value_delimiter = ',')]
         bootstrap_peers: Option<Vec<String>>,
+
+        /// Trusted P2P peer IDs accepted for gossip in strict mode.
+        #[arg(long = "trusted-peer", value_delimiter = ',')]
+        trusted_peers: Option<Vec<String>>,
+
+        /// Enable mDNS discovery for isolated loopback development only.
+        #[arg(long)]
+        allow_mdns_local: bool,
 
         // ── Sync options ─────────────────────────────────────────
         /// Sync blocks from a running peer's RPC URL on startup.
@@ -116,8 +351,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Initialize tracing
     tracing_subscriber::fmt()
         .with_env_filter(
-            EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| EnvFilter::new("info")),
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
         )
         .init();
 
@@ -130,17 +364,34 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             data_dir,
             mempool_size,
             vk_dir,
+            allow_unverified_local,
             bb_path,
             node_id,
             validators,
             block_interval,
             no_auto_blocks,
+            allow_unauthenticated_rpc_local,
+            allow_public_rpc_metadata,
             p2p_port,
+            p2p_bind,
             bootstrap_peers,
+            trusted_peers,
+            allow_mdns_local,
             sync_from,
         } => {
             info!("Tonkl Node v0.2.0 -- Phase B3: P2P Multi-Node Testnet");
             info!("Data directory: {}", data_dir);
+
+            let tonkl_env = std::env::var("TONKL_ENV").ok();
+            validate_rpc_auth_allowed(
+                allow_unauthenticated_rpc_local,
+                &bind,
+                p2p_port,
+                sync_from.as_deref(),
+                tonkl_env.as_deref(),
+                env_value_present("TONKL_RPC_SECRET"),
+            )
+            .map_err(|e| format!("Unsafe RPC authentication configuration: {}", e))?;
 
             // Open sled database
             let db = sled::open(&data_dir)?;
@@ -180,10 +431,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     v
                 }
                 None => {
+                    validate_unverified_mode_allowed(
+                        allow_unverified_local,
+                        &bind,
+                        p2p_port,
+                        sync_from.as_deref(),
+                        tonkl_env.as_deref(),
+                    )
+                    .map_err(|e| format!("Unsafe verifier configuration: {}", e))?;
                     warn!("╔══════════════════════════════════════════════════════════╗");
-                    warn!("║  PROOF VERIFICATION DISABLED — no --vk-dir specified    ║");
+                    warn!("║  PROOF VERIFICATION DISABLED - local dev override set   ║");
                     warn!("║  Any transaction will be accepted without ZK proof.     ║");
-                    warn!("║  This is acceptable for local development only.         ║");
+                    warn!("║  This is restricted to loopback, no P2P, and no sync.   ║");
                     warn!("║  For testnet/production: pass --vk-dir <path>           ║");
                     warn!("╚══════════════════════════════════════════════════════════╝");
                     ProofVerifier::disabled()
@@ -206,6 +465,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 verifier,
                 tx_index: std::collections::HashMap::new(),
                 chain_meta,
+                mint_policy: MintPolicy::from_env(),
             }));
 
             // ── Chain sync (fetch blocks from a running peer) ──
@@ -234,24 +494,37 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let (local_block_tx, local_block_rx) = mpsc::channel::<Block>(256);
 
             if p2p_enabled {
-                let bootstrap: Vec<libp2p::Multiaddr> = bootstrap_peers
-                    .unwrap_or_default()
-                    .iter()
-                    .filter_map(|s| s.parse().ok())
-                    .collect();
+                let bootstrap = parse_bootstrap_peers(bootstrap_peers)
+                    .map_err(|e| format!("Unsafe P2P configuration: {}", e))?;
+                let trusted_peers = parse_trusted_peers(trusted_peers)
+                    .map_err(|e| format!("Unsafe P2P configuration: {}", e))?;
+                validate_p2p_config(
+                    p2p_enabled,
+                    allow_mdns_local,
+                    &p2p_bind,
+                    &bootstrap,
+                    &trusted_peers,
+                    tonkl_env.as_deref(),
+                )
+                .map_err(|e| format!("Unsafe P2P configuration: {}", e))?;
+                let listen_addr = parse_p2p_bind_addr(&p2p_bind, p2p_port)
+                    .map_err(|e| format!("Unsafe P2P configuration: {}", e))?;
 
                 let p2p_config = P2pConfig {
-                    listen_port: p2p_port,
+                    listen_addr,
                     bootstrap_peers: bootstrap.clone(),
+                    trusted_peers,
+                    allow_mdns_discovery: allow_mdns_local,
                     node_id: node_id.clone(),
                 };
 
                 let (swarm, local_peer_id) = p2p::build_swarm(&p2p_config)?;
                 info!("P2P enabled: peer ID = {}", local_peer_id);
                 info!(
-                    "P2P port: {}, bootstrap peers: {}",
-                    p2p_port,
-                    bootstrap.len()
+                    "P2P listen: {}, bootstrap peers: {}, mDNS local: {}",
+                    p2p_config.listen_addr,
+                    bootstrap.len(),
+                    allow_mdns_local
                 );
 
                 // Channels between P2P and node event handler
@@ -321,13 +594,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             info!("Starting JSON-RPC server on {}", addr);
 
             // Pass tx broadcast channel to RPC so submitted txs reach P2P
-            let tx_broadcast = if p2p_enabled {
-                Some(local_tx_tx)
-            } else {
-                None
-            };
+            let tx_broadcast = if p2p_enabled { Some(local_tx_tx) } else { None };
 
-            start_rpc_server(state, &addr, tx_broadcast).await?;
+            let allow_public_metadata_reads =
+                allow_public_rpc_metadata || allow_unauthenticated_rpc_local;
+            start_rpc_server(
+                state,
+                &addr,
+                tx_broadcast,
+                allow_unauthenticated_rpc_local,
+                allow_public_metadata_reads,
+            )
+            .await?;
 
             // Signal block producer to stop
             let _ = cancel_tx.send(true);
@@ -493,5 +771,165 @@ async fn run_block_producer_with_broadcast(
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn loopback_bind_detection_is_strict() {
+        assert!(is_loopback_bind("127.0.0.1"));
+        assert!(is_loopback_bind("::1"));
+        assert!(is_loopback_bind("localhost"));
+        assert!(!is_loopback_bind("0.0.0.0"));
+        assert!(!is_loopback_bind("192.168.1.20"));
+    }
+
+    #[test]
+    fn unverified_mode_requires_explicit_flag() {
+        let result = validate_unverified_mode_allowed(false, "127.0.0.1", 0, None, None);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn unverified_mode_allows_isolated_loopback_dev() {
+        let result = validate_unverified_mode_allowed(true, "127.0.0.1", 0, None, None);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn unverified_mode_rejects_public_bind() {
+        let result = validate_unverified_mode_allowed(true, "0.0.0.0", 0, None, None);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn unverified_mode_rejects_p2p_and_sync() {
+        assert!(validate_unverified_mode_allowed(true, "127.0.0.1", 9300, None, None).is_err());
+        assert!(validate_unverified_mode_allowed(
+            true,
+            "127.0.0.1",
+            0,
+            Some("http://127.0.0.1:9100"),
+            None,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn unverified_mode_rejects_beta_or_production_env() {
+        assert!(
+            validate_unverified_mode_allowed(true, "127.0.0.1", 0, None, Some("beta"),).is_err()
+        );
+        assert!(
+            validate_unverified_mode_allowed(true, "127.0.0.1", 0, None, Some("production"),)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn rpc_auth_allows_configured_secret() {
+        let result = validate_rpc_auth_allowed(
+            false,
+            "0.0.0.0",
+            9300,
+            Some("http://127.0.0.1:9100"),
+            Some("beta"),
+            true,
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn rpc_auth_requires_secret_by_default() {
+        let result = validate_rpc_auth_allowed(false, "127.0.0.1", 0, None, None, false);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn rpc_auth_allows_explicit_isolated_loopback_dev() {
+        let result = validate_rpc_auth_allowed(true, "127.0.0.1", 0, None, None, false);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn rpc_auth_rejects_unsafe_local_override() {
+        assert!(validate_rpc_auth_allowed(true, "0.0.0.0", 0, None, None, false).is_err());
+        assert!(validate_rpc_auth_allowed(true, "127.0.0.1", 9300, None, None, false).is_err());
+        assert!(validate_rpc_auth_allowed(
+            true,
+            "127.0.0.1",
+            0,
+            Some("http://127.0.0.1:9100"),
+            None,
+            false,
+        )
+        .is_err());
+        assert!(
+            validate_rpc_auth_allowed(true, "127.0.0.1", 0, None, Some("beta"), false).is_err()
+        );
+    }
+
+    #[test]
+    fn rpc_auth_secret_does_not_bypass_local_override_guard() {
+        assert!(validate_rpc_auth_allowed(true, "0.0.0.0", 0, None, None, true).is_err());
+        assert!(validate_rpc_auth_allowed(true, "127.0.0.1", 9300, None, None, true).is_err());
+        assert!(validate_rpc_auth_allowed(true, "127.0.0.1", 0, None, Some("beta"), true).is_err());
+    }
+
+    fn test_peer_id() -> PeerId {
+        libp2p::identity::Keypair::generate_ed25519()
+            .public()
+            .to_peer_id()
+    }
+
+    #[test]
+    fn p2p_strict_mode_requires_trusted_identity() {
+        let result = validate_p2p_config(false, false, "127.0.0.1", &[], &HashSet::new(), None);
+        assert!(result.is_ok());
+
+        let result = validate_p2p_config(true, false, "127.0.0.1", &[], &HashSet::new(), None);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn p2p_strict_mode_accepts_peer_id_bootstrap() {
+        let peer_id = test_peer_id();
+        let bootstrap: Multiaddr = format!("/ip4/127.0.0.1/tcp/9300/p2p/{}", peer_id)
+            .parse()
+            .unwrap();
+
+        let result =
+            validate_p2p_config(true, false, "0.0.0.0", &[bootstrap], &HashSet::new(), None);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn p2p_strict_mode_rejects_unbound_bootstrap() {
+        let bootstrap: Multiaddr = "/ip4/127.0.0.1/tcp/9300".parse().unwrap();
+        let result = validate_p2p_config(
+            true,
+            false,
+            "127.0.0.1",
+            &[bootstrap],
+            &HashSet::new(),
+            None,
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn p2p_mdns_mode_is_local_only() {
+        let result = validate_p2p_config(true, true, "127.0.0.1", &[], &HashSet::new(), None);
+        assert!(result.is_ok());
+
+        let result = validate_p2p_config(true, true, "0.0.0.0", &[], &HashSet::new(), None);
+        assert!(result.is_err());
+
+        let result =
+            validate_p2p_config(true, true, "127.0.0.1", &[], &HashSet::new(), Some("beta"));
+        assert!(result.is_err());
     }
 }

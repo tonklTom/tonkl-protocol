@@ -34,7 +34,10 @@ This policy covers:
 ## Known Limitations (Alpha)
 
 This is alpha software. Known limitations include:
-- Proof verification can be disabled via CLI flag (testnet mode)
+- Proof verification can be disabled only with the explicit `--allow-unverified-local` loopback development override
+- RPC write authentication can be disabled only with the explicit `--allow-unauthenticated-rpc-local` loopback development override
+- Metadata-heavy RPC reads require `TONKL_RPC_SECRET` unless `--allow-public-rpc-metadata` is deliberately enabled
+- P2P mDNS discovery is disabled by default and can be enabled only with `--allow-mdns-local` on loopback outside beta/production
 - The default faucet key (`0xface70`) is public and for testnet use only
 - P2P gossip does not yet validate block signatures (round-robin trust model)
 - No slashing or stake-based consensus

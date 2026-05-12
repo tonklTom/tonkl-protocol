@@ -10,13 +10,13 @@
 // The event handler runs as a tokio task, processing NetworkEvents
 // from the P2P layer and issuing NetworkCommands back.
 
-use crate::block::{Block, BlockBuilder, Transaction, validate_and_apply_block};
+use crate::block::{validate_and_apply_block, Block, BlockBuilder, Transaction};
 use crate::p2p::{NetworkCommand, NetworkEvent};
 use crate::rpc::{ConfirmedTx, NodeState};
 
 use std::sync::Arc;
 use tokio::sync::{mpsc, RwLock};
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info, warn};
 
 // ─────────────────────────────────────────────────────────────────────
 // Chain Sync (via RPC)
@@ -29,12 +29,14 @@ use tracing::{debug, error, info, warn};
 /// bring the node up to date with the peer.
 ///
 /// Returns the number of blocks synced, or an error description.
-pub async fn sync_from_peer(
-    state: &Arc<RwLock<NodeState>>,
-    peer_url: &str,
-) -> Result<u64, String> {
+pub async fn sync_from_peer(state: &Arc<RwLock<NodeState>>, peer_url: &str) -> Result<u64, String> {
     let client = reqwest::Client::new();
     let mut total_synced: u64 = 0;
+    let rpc_secret = std::env::var("TONKL_SYNC_RPC_SECRET")
+        .ok()
+        .or_else(|| std::env::var("TONKL_RPC_SECRET").ok())
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
 
     // Get peer's block height first
     let peer_height = {
@@ -87,10 +89,14 @@ pub async fn sync_from_peer(
             break;
         }
 
+        let params = match &rpc_secret {
+            Some(secret) => serde_json::json!([from_block, batch_size, secret]),
+            None => serde_json::json!([from_block, batch_size]),
+        };
         let body = serde_json::json!({
             "jsonrpc": "2.0",
             "method": "get_blocks_range",
-            "params": [from_block, batch_size],
+            "params": params,
             "id": 1
         });
 
@@ -106,10 +112,8 @@ pub async fn sync_from_peer(
             .await
             .map_err(|e| format!("Invalid block batch response: {}", e))?;
 
-        let blocks: Vec<Block> = serde_json::from_value(
-            result["result"].clone(),
-        )
-        .map_err(|e| format!("Failed to deserialize blocks: {}", e))?;
+        let blocks: Vec<Block> = serde_json::from_value(result["result"].clone())
+            .map_err(|e| format!("Failed to deserialize blocks: {}", e))?;
 
         if blocks.is_empty() {
             break;
@@ -132,10 +136,23 @@ pub async fn sync_from_peer(
                 ));
             }
 
+            if let Err(e) = s
+                .mint_policy
+                .validate_block_mints(&s.chain_meta, &block.transactions)
+            {
+                return Err(format!(
+                    "Block #{} rejected by mint policy during sync: {}",
+                    block_num, e
+                ));
+            }
+
+            // Destructure to allow split borrows (Rust can't split through DerefMut)
+            let state_ref = &mut *s;
             match validate_and_apply_block(
                 &block,
-                &mut s.note_tree,
-                &mut s.nullifier_set,
+                &state_ref.verifier,
+                &mut state_ref.note_tree,
+                &mut state_ref.nullifier_set,
                 expected_block_number,
                 expected_parent_hash,
             ) {
@@ -153,6 +170,16 @@ pub async fn sync_from_peer(
                                 tx_type: tx.tx_type,
                             },
                         );
+                    }
+
+                    if let Err(e) = s
+                        .mint_policy
+                        .record_block_mints(&s.chain_meta, &block.transactions)
+                    {
+                        return Err(format!(
+                            "Failed to persist mint supply for synced block #{}: {}",
+                            block_num, e
+                        ));
                     }
 
                     // Persist chain metadata
@@ -258,10 +285,7 @@ pub async fn run_event_handler(
 /// Handle a transaction received from a peer.
 ///
 /// Validates it hasn't been seen before and adds to mempool.
-async fn handle_received_transaction(
-    state: &Arc<RwLock<NodeState>>,
-    tx: Transaction,
-) {
+async fn handle_received_transaction(state: &Arc<RwLock<NodeState>>, tx: Transaction) {
     let tx_hash = format!("0x{}", hex::encode(&tx.tx_hash[..4]));
     let mut s = state.write().await;
 
@@ -291,6 +315,14 @@ async fn handle_received_transaction(
         }
     }
 
+    if let Err(e) = s
+        .mint_policy
+        .validate_transaction(&s.chain_meta, &s.mempool, &tx)
+    {
+        debug!("Transaction {} failed mint policy: {}", tx_hash, e);
+        return;
+    }
+
     // Add to mempool (unchecked since we already validated nullifiers)
     s.mempool.submit_unchecked(tx);
     debug!("Added transaction {} from peer to mempool", tx_hash);
@@ -299,10 +331,7 @@ async fn handle_received_transaction(
 /// Handle a block received from a peer.
 ///
 /// Validates the block against our current state and applies it if valid.
-async fn handle_received_block(
-    state: &Arc<RwLock<NodeState>>,
-    block: Block,
-) {
+async fn handle_received_block(state: &Arc<RwLock<NodeState>>, block: Block) {
     let block_num = block.header.block_number;
 
     let mut s = state.write().await;
@@ -327,28 +356,50 @@ async fn handle_received_block(
     }
 
     // Validate and apply the block
+    // Destructure to allow split borrows (Rust can't split through DerefMut)
+    if let Err(e) = s
+        .mint_policy
+        .validate_block_mints(&s.chain_meta, &block.transactions)
+    {
+        warn!("Rejected block #{} by mint policy: {}", block_num, e);
+        return;
+    }
+
+    let state_ref = &mut *s;
     match validate_and_apply_block(
         &block,
-        &mut s.note_tree,
-        &mut s.nullifier_set,
+        &state_ref.verifier,
+        &mut state_ref.note_tree,
+        &mut state_ref.nullifier_set,
         expected_block_number,
         expected_parent_hash,
     ) {
         Ok(()) => {
             // Update block builder state
             let block_hash = block.hash();
-            s.block_builder = crate::block::BlockBuilder::from_state(
-                block_num + 1,
-                block_hash,
-            );
+            s.block_builder = crate::block::BlockBuilder::from_state(block_num + 1, block_hash);
 
             // Index confirmed transactions
             for tx in &block.transactions {
                 let tx_hash_hex = format!("0x{}", hex::encode(tx.tx_hash));
-                s.tx_index.insert(tx_hash_hex, ConfirmedTx {
-                    block_number: block_num,
-                    tx_type: tx.tx_type,
-                });
+                s.tx_index.insert(
+                    tx_hash_hex,
+                    ConfirmedTx {
+                        block_number: block_num,
+                        tx_type: tx.tx_type,
+                    },
+                );
+            }
+
+            if let Err(e) = s
+                .mint_policy
+                .record_block_mints(&s.chain_meta, &block.transactions)
+            {
+                warn!(
+                    "Failed to persist mint supply for block #{}: {}",
+                    block_num, e
+                );
+                return;
             }
 
             // Purge confirmed nullifiers from mempool

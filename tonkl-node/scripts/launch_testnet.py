@@ -37,6 +37,7 @@ The script:
 
 import json
 import os
+import secrets
 import shutil
 import signal
 import subprocess
@@ -51,7 +52,8 @@ ROOT = SCRIPT_DIR.parent.parent  # tonkl/
 
 sys.path.insert(0, str(SCRIPT_DIR))
 from node_client import TonklClient
-from genesis import build_genesis, find_vk, DEFAULT_FAUCET_SK
+from genesis import build_genesis, find_vk, DEFAULT_FAUCET_SK, GENESIS_MINTS
+from witness_builder import CryptoHelper
 
 # ─────────────────────────────────────────────────────────────────────
 # Display helpers
@@ -91,6 +93,21 @@ def _elapsed(start: float) -> str:
 NODE_BIN = ROOT / "tonkl-node" / "target" / "release" / "tonkl-node"
 
 
+def _mint_authorities_env(faucet_sk: str) -> dict:
+    """Build node mint-policy env for genesis assets."""
+    crypto = CryptoHelper()
+    pk_x, pk_y = crypto.derive_pk(faucet_sk)
+    authorities = {}
+    for spec in GENESIS_MINTS:
+        total = sum(note["value"] for note in spec["notes"])
+        authorities[spec["asset_id"]] = {
+            "pk_x": pk_x,
+            "pk_y": pk_y,
+            "max_supply": str(total),
+        }
+    return {"TONKL_MINT_AUTHORITIES": json.dumps(authorities)}
+
+
 class TestnetNode:
     """Manages a single Tonkl node process."""
 
@@ -103,6 +120,7 @@ class TestnetNode:
         p2p_port: int = 0,
         bind: str = "127.0.0.1",
         num_nodes: int = 1,
+        extra_env: Optional[dict] = None,
     ):
         self.node_id = node_id
         self.port = port
@@ -111,6 +129,7 @@ class TestnetNode:
         self.vk_dir = vk_dir
         self.bind = bind
         self.num_nodes = num_nodes
+        self.extra_env = extra_env or {}
         self.url = f"http://{bind}:{port}"
         self.process: Optional[subprocess.Popen] = None
         self.client = TonklClient(self.url, timeout=30.0)
@@ -146,7 +165,11 @@ class TestnetNode:
 
         # P2P networking
         if self.p2p_port > 0:
-            cmd.extend(["--p2p-port", str(self.p2p_port)])
+            cmd.extend([
+                "--p2p-port", str(self.p2p_port),
+                "--p2p-bind", self.bind,
+                "--allow-mdns-local",
+            ])
             if bootstrap_addr:
                 cmd.extend(["--bootstrap", bootstrap_addr])
 
@@ -158,6 +181,7 @@ class TestnetNode:
             cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
+            env={**os.environ, **self.extra_env},
         )
 
     def stop(self) -> None:
@@ -242,6 +266,7 @@ class Testnet:
         self.data_dirs: List[str] = []
         self.vk_dir: Optional[Path] = None
         self.genesis_config: Optional[dict] = None
+        self.rpc_secret: Optional[str] = None
         self._running = False
 
     def _log(self, msg: str) -> None:
@@ -290,6 +315,12 @@ class Testnet:
         for i in range(self.num_nodes):
             d = tempfile.mkdtemp(prefix=f"tonkl-testnet-node{i}-")
             self.data_dirs.append(d)
+        mint_env = _mint_authorities_env(self.faucet_sk)
+        self.rpc_secret = os.environ.get("TONKL_RPC_SECRET")
+        if not self.rpc_secret or not self.rpc_secret.strip():
+            self.rpc_secret = secrets.token_hex(32)
+            os.environ["TONKL_RPC_SECRET"] = self.rpc_secret
+        node_env = {**mint_env, "TONKL_RPC_SECRET": self.rpc_secret}
 
         # ── Step 3: Start primary node ────────────────────────────────
         step_start = time.time()
@@ -301,6 +332,7 @@ class Testnet:
             vk_dir=str(self.vk_dir),
             p2p_port=self.base_p2p_port,
             num_nodes=self.num_nodes,
+            extra_env=node_env,
         )
         primary.start()
         self.nodes.append(primary)
@@ -350,6 +382,7 @@ class Testnet:
                     vk_dir=str(self.vk_dir),
                     p2p_port=self.base_p2p_port + i,
                     num_nodes=self.num_nodes,
+                    extra_env=node_env,
                 )
                 node.start(
                     bootstrap_addr=primary_bootstrap,
@@ -444,12 +477,16 @@ class Testnet:
         primary_url = self.nodes[0].url
         self._log("")
         self._log("  Quick Start:")
+        if self.rpc_secret:
+            self._log("")
+            self._log("    Set RPC auth for wallet commands:")
+            self._log(f"       export TONKL_RPC_SECRET={self.rpc_secret}")
         self._log("")
         self._log("    1. Create a wallet:")
         self._log(f"       python3 scripts/tonkl_wallet.py --node {primary_url}")
         self._log("")
         self._log("    2. Get testnet tokens:")
-        self._log(f"       python3 scripts/tonkl_wallet.py --node {primary_url} faucet --to-sk <your-key>")
+        self._log(f"       python3 scripts/tonkl_wallet.py --node {primary_url} faucet --to-key-index 0")
         self._log("")
         self._log("    3. Check your balance:")
         self._log(f"       python3 scripts/tonkl_wallet.py --node {primary_url} balance")
