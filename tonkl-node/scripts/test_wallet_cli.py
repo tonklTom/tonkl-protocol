@@ -93,6 +93,23 @@ def read_mint_commitments():
     return cms
 
 
+def mint_policy_env():
+    pi_bytes = MINT_PI.read_bytes()
+
+    def field_hex(index):
+        return "0x" + pi_bytes[index * 32 : (index + 1) * 32].hex()
+
+    env = os.environ.copy()
+    env["TONKL_MINT_AUTHORITIES"] = json.dumps({
+        str(int(field_hex(33), 16)): {
+            "pk_x": field_hex(34),
+            "pk_y": field_hex(35),
+            "max_supply": str(int(field_hex(32), 16)),
+        }
+    })
+    return env
+
+
 def start_node(vk_path):
     global data_dir
     data_dir = tempfile.mkdtemp(prefix="tonkl-wtest-data-")
@@ -102,9 +119,11 @@ def start_node(vk_path):
             "--port", str(PORT),
             "--data-dir", data_dir,
             "--vk-dir", str(vk_path),
+            "--allow-unauthenticated-rpc-local",
         ],
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
+        env=mint_policy_env(),
     )
 
 
@@ -479,8 +498,10 @@ def main():
 
         scan_keys = recipient_wallet.get_scan_keys()
         check("get_scan_keys returns 1 key", len(scan_keys) == 1)
-        check("scan key matches spending_sk",
-              scan_keys[0]["spending_sk"] == recipient_sk)
+        check("scan key output hides spending_sk",
+              "spending_sk" not in scan_keys[0])
+        check("scan key output includes scan pk",
+              scan_keys[0]["scan_pk_hex"] == scan_pk_hex)
 
         # [10b] Derive scan keypair manually and verify encrypt/decrypt round-trip
         scan_sk_bytes, scan_pk_bytes = _derive_scan_keypair(recipient_sk)

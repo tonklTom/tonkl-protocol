@@ -23,18 +23,16 @@ Usage:
   # First time: run the setup wizard
   tonkl wallet                   # auto-triggers onboarding on first run
 
-  # Or use directly:
-  tonkl wallet init --sk 0xaaaa01
-
   # Check balance and notes
   tonkl wallet balance
   tonkl wallet notes
 
-  # Import notes from a mint (provide sk, value, rho for each)
-  tonkl wallet import-note --sk 0xaaaa01 --value 400 --rho 6001
+  # Import notes from a mint (read secrets from env, not argv)
+  export TONKL_IMPORT_SK=<key-from-secure-source>
+  tonkl wallet import-note --sk-env TONKL_IMPORT_SK --value 400 --rho 6001
 
   # Send a transfer
-  tonkl wallet send 200 --to-pk-x 0x... --to-pk-y 0x... --sk 0xaaaa01
+  tonkl wallet send 200 --to-pk-x 0x... --to-pk-y 0x...
 
   # Split a note into smaller denominations
   tonkl wallet split <note_id> --values 100,50,30,20
@@ -641,7 +639,7 @@ class NodeWallet:
                 self._conn.close()
                 raise ValueError(
                     "Database appears to be encrypted. "
-                    "Use --passphrase to unlock it."
+                    "Use --passphrase-stdin or --passphrase-env to unlock it."
                 )
 
         self._conn.execute("PRAGMA journal_mode=WAL")
@@ -771,7 +769,9 @@ class NodeWallet:
         Derive a spending key from the master seed at the given index.
 
         Formula:
-            sk = HMAC-SHA512(domain || seed || index) mod BN254_P
+            sk = PBKDF2-HMAC-SHA512(
+                domain || seed || index, salt=domain, iterations=1
+            )[0..32] mod BN254_P
 
         The key is stored in derived_keys for tracking. Also auto-registers
         a scan key for the derived spending key.
@@ -788,7 +788,7 @@ class NodeWallet:
         seed_hex = self._get_seed_hex()
         seed_bytes = bytes.fromhex(seed_hex)
 
-        # Domain-separated HMAC-SHA512 derivation
+        # Domain-separated PBKDF2-HMAC-SHA512 derivation.
         derive_input = (
             HD_DERIVATION_DOMAIN
             + seed_bytes
@@ -1255,6 +1255,7 @@ class NodeWallet:
         self,
         recipient_pk_x: str,
         recipient_pk_y: str,
+        recipient_sk: Optional[str] = None,
         asset_id: str = DEFAULT_ASSET_ID,
         amount: Optional[int] = None,
         sender_sk: Optional[str] = None,
@@ -1270,6 +1271,8 @@ class NodeWallet:
 
         Args:
             recipient_pk_x/y: Recipient public key.
+            recipient_sk: Optional recipient spending key, used only to derive
+                the scan public key for encrypted note delivery.
             asset_id: Which asset to drip ("1" for TNKL, "4" for sUSDC).
             amount: Override drip amount. Uses default if None.
             sender_sk: Faucet spending key. Uses first available if None.
@@ -1322,6 +1325,7 @@ class NodeWallet:
             to_pk_y=recipient_pk_y,
             to_value=amount,
             sender_sk=sender_sk,
+            recipient_sk=recipient_sk,
             asset_id=asset_id,
         )
 
@@ -1427,7 +1431,7 @@ class NodeWallet:
             "symbol": sym,
             "name": name.strip(),
             "decimals": decimals,
-            "authority_sk": authority_sk,
+            "has_authority": bool(authority_sk),
         }
 
     def mint_token(
@@ -1683,7 +1687,7 @@ class NodeWallet:
                 "symbol": r["symbol"],
                 "name": r["name"],
                 "decimals": r["decimals"],
-                "authority_sk": r["authority_sk"],
+                "has_authority": bool(r["authority_sk"]),
                 "created_at": r["created_at"],
             }
             for r in rows
@@ -2465,7 +2469,15 @@ class NodeWallet:
         rows = self._conn.execute(
             "SELECT spending_sk, scan_pk_hex FROM scan_keys ORDER BY created_at"
         ).fetchall()
-        return [{"spending_sk": r["spending_sk"], "scan_pk_hex": r["scan_pk_hex"]} for r in rows]
+        keys = []
+        for r in rows:
+            pk_x, pk_y = self.crypto.derive_pk(r["spending_sk"])
+            keys.append({
+                "pk_x": pk_x,
+                "pk_y": pk_y,
+                "scan_pk_hex": r["scan_pk_hex"],
+            })
+        return keys
 
     def get_scan_pk_for_sk(self, spending_sk: str) -> Optional[str]:
         """Get the scan public key for a spending key, or None."""
@@ -3845,7 +3857,7 @@ def _friendly_error(err: Exception, cmd: str, node_url: str, local_cmds: set) ->
     # ── Database encryption errors ──
     if "encrypted" in msg.lower() or "passphrase" in msg.lower():
         print(f"\n  ✗ {msg}")
-        print(f"  If your wallet is encrypted, use --passphrase to unlock it.")
+        print(f"  If your wallet is encrypted, use --passphrase-stdin or --passphrase-env to unlock it.")
         print()
         return
 
@@ -3866,7 +3878,7 @@ def _friendly_error(err: Exception, cmd: str, node_url: str, local_cmds: set) ->
     # ── Recipient missing ──
     if "recipient" in msg.lower():
         print(f"\n  ✗ {msg}")
-        print(f"  Specify a recipient with --to-sk <hex> or --to-pk-x/--to-pk-y.")
+        print(f"  Specify a recipient with --to-sk-env ENV or --to-pk-x/--to-pk-y.")
         print()
         return
 
@@ -3908,11 +3920,11 @@ common workflows:
 
   First time setup:
     %(prog)s                                        (auto-runs setup wizard)
-    %(prog)s faucet --to-sk <your-key>              (get testnet tokens)
+    %(prog)s faucet --to-key-index 0                (get testnet tokens)
     %(prog)s balance                                 (check balance)
 
   Send tokens:
-    %(prog)s send 100 --to-sk <recipient-key>       (private transfer)
+    %(prog)s send 100 --to-sk-env TONKL_TO_SK       (private transfer)
     %(prog)s send 100 --to-pk-x <hex> --to-pk-y <hex>
 
   Manage notes:
@@ -3921,7 +3933,7 @@ common workflows:
     %(prog)s merge <note-ids>                        (merge notes)
 
   Create custom tokens:
-    %(prog)s create-token GOLD --name "Gold" --asset-id 100 --authority-sk 0xkey
+    %(prog)s create-token GOLD --name "Gold" --asset-id 100 --authority-key-index 0
     %(prog)s mint-token --asset-id 100 --amount 1000
 
   Staking:
@@ -3940,12 +3952,83 @@ common workflows:
     %(prog)s slash-validator <id> --reason downtime     (slash a validator)
 
   Auto-receive:
-    %(prog)s register-key <sk>                       (enable auto-detect)
+    %(prog)s register-key --sk-env TONKL_SCAN_SK     (enable auto-detect)
     %(prog)s watch                                   (scan continuously)
 
 environment variables:
   TONKL_NODE_URL    Node RPC URL (overrides --node-url default)
+  TONKL_ALLOW_SECRET_ARGV=1
+                    Allow raw private material in command-line args for
+                    isolated tests only. Prefer env/stdin/key-index inputs.
 """
+
+SECRET_ARGV_ENV = "TONKL_ALLOW_SECRET_ARGV"
+
+
+def _secret_argv_allowed(args) -> bool:
+    if getattr(args, "allow_secret_argv", False):
+        return True
+    value = os.environ.get(SECRET_ARGV_ENV, "").strip().lower()
+    return value in {"1", "true", "yes", "allow"}
+
+
+def _secret_argv_violations(args) -> List[Tuple[str, str]]:
+    """Return secret-bearing argv inputs that should be rejected by default."""
+    violations: List[Tuple[str, str]] = []
+    cmd = getattr(args, "command", None)
+
+    if getattr(args, "passphrase", None):
+        violations.append(("--passphrase", "use --passphrase-stdin or --passphrase-env"))
+
+    if cmd in {"init-seed", "restore-seed"} and getattr(args, "bip39_passphrase", ""):
+        violations.append((
+            "--bip39-passphrase",
+            "use --bip39-passphrase-env or leave it empty",
+        ))
+
+    if cmd == "address" and getattr(args, "sk", None):
+        violations.append(("address <sk>", "use address --sk-env ENV"))
+    elif cmd == "import-note" and getattr(args, "sk", None):
+        violations.append(("import-note --sk", "use import-note --sk-env ENV"))
+    elif cmd == "import-mint" and getattr(args, "sks", None):
+        violations.append(("import-mint --sks", "use import-mint --sks-env ENV"))
+    elif cmd == "send":
+        if getattr(args, "to_sk", None):
+            violations.append(("send --to-sk", "use --to-sk-env, --to-pk-x/--to-pk-y, or an address book flow"))
+        if getattr(args, "sender_sk", None):
+            violations.append(("send --sk", "use --sk-env or select notes by ID"))
+    elif cmd == "register-key" and getattr(args, "sk", None):
+        violations.append(("register-key <sk>", "use register-key --sk-env ENV"))
+    elif cmd == "restore-seed" and getattr(args, "words", None):
+        violations.append(("restore-seed <words>", "use restore-seed --words-stdin or --words-env ENV"))
+    elif cmd == "faucet":
+        if getattr(args, "to_sk", None):
+            violations.append(("faucet --to-sk", "use --to-key-index, --to-sk-env, or --to-pk-x/--to-pk-y"))
+        if getattr(args, "from_sk", None):
+            violations.append(("faucet --from-sk", "use --from-sk-env or faucet wallet storage"))
+    elif cmd == "create-token" and getattr(args, "authority_sk", None):
+        violations.append(("create-token --authority-sk", "use --authority-key-index or --authority-sk-env"))
+    elif cmd == "mint-token":
+        if getattr(args, "authority_sk", None):
+            violations.append(("mint-token --authority-sk", "use --authority-key-index or --authority-sk-env"))
+        if getattr(args, "recipient_sk", None):
+            violations.append(("mint-token --recipient-sk", "use --recipient-sk-env or omit it to mint to authority"))
+
+    return violations
+
+
+def _enforce_no_secret_argv(args, parser) -> None:
+    violations = _secret_argv_violations(args)
+    if not violations or _secret_argv_allowed(args):
+        return
+
+    detail = "; ".join(f"{flag}: {hint}" for flag, hint in violations)
+    parser.error(
+        "secret-bearing command-line argument blocked. "
+        "Private keys, passphrases, and seed phrases in argv can leak via shell "
+        f"history and process lists. {detail}. "
+        f"For isolated tests only, pass --allow-secret-argv or set {SECRET_ARGV_ENV}=1."
+    )
 
 
 def main():
@@ -3966,7 +4049,7 @@ def main():
     )
     parser.add_argument(
         "--passphrase", default=None,
-        help="Passphrase for SQLCipher database encryption (requires sqlcipher3)",
+        help="UNSAFE argv passphrase for SQLCipher database encryption. Prefer --passphrase-stdin or --passphrase-env.",
     )
     parser.add_argument(
         "--passphrase-stdin", action="store_true",
@@ -3979,6 +4062,10 @@ def main():
     parser.add_argument(
         "--json", action="store_true", dest="json_output",
         help="Output machine-readable JSON (for Shlem integration)",
+    )
+    parser.add_argument(
+        "--allow-secret-argv", action="store_true",
+        help="Allow raw private material in argv for isolated tests only",
     )
 
     sub = parser.add_subparsers(dest="command", metavar="command")
@@ -3993,11 +4080,13 @@ def main():
 
     # ── Transactions ───────────────────────────────────────────────────
     p_addr = sub.add_parser("address", help="Show public key address for a spending key")
-    p_addr.add_argument("sk", help="Spending key (hex)")
+    p_addr.add_argument("sk", nargs="?", help="UNSAFE argv spending key (hex). Prefer --sk-env.")
+    p_addr.add_argument("--sk-env", help="Read spending key from this environment variable")
 
     # ── import-note ───────────────────────────────────────────────────
     p_imp = sub.add_parser("import-note", help="Import a note into the wallet")
-    p_imp.add_argument("--sk", required=True, help="Spending key (hex)")
+    p_imp.add_argument("--sk", help="UNSAFE argv spending key (hex). Prefer --sk-env.")
+    p_imp.add_argument("--sk-env", help="Read spending key from this environment variable")
     p_imp.add_argument("--value", type=int, required=True, help="Note value")
     p_imp.add_argument("--rho", required=True, help="Note rho")
     p_imp.add_argument("--asset-id", default=DEFAULT_ASSET_ID, help="Asset ID")
@@ -4009,8 +4098,12 @@ def main():
         help="Import mint notes (from generate_mint_witness.py parameters)",
     )
     p_mint.add_argument(
-        "--sks", required=True,
-        help='Comma-separated spending keys (e.g., "0xaaaa01,0xbbbb02,0xcccc03,0xdddd04")',
+        "--sks",
+        help='UNSAFE argv comma-separated spending keys (e.g., "0xaaaa01,0xbbbb02"). Prefer --sks-env.',
+    )
+    p_mint.add_argument(
+        "--sks-env",
+        help="Read comma-separated spending keys from this environment variable",
     )
     p_mint.add_argument(
         "--values", required=True,
@@ -4028,13 +4121,16 @@ def main():
 
     p_send = sub.add_parser("send", help="Send a private transfer (auto-selects notes, generates proof)")
     p_send.add_argument("amount", type=int, help="Amount to send")
-    p_send.add_argument("--to-sk", help="Recipient sk (hex) — derives pk automatically")
+    p_send.add_argument("--to-sk", help="UNSAFE argv recipient sk (hex). Prefer --to-sk-env or public key.")
+    p_send.add_argument("--to-sk-env", help="Read recipient sk from this environment variable")
     p_send.add_argument("--to-pk-x", help="Recipient pk_x (hex)")
     p_send.add_argument("--to-pk-y", help="Recipient pk_y (hex)")
     p_send.add_argument("--from", dest="from_ids",
                         help="Comma-separated note IDs to spend (1-2). Auto-selected if omitted.")
     p_send.add_argument("--sk", dest="sender_sk",
-                        help="Only use notes owned by this key (for auto-selection)")
+                        help="UNSAFE argv sender key filter. Prefer --sk-env or note IDs.")
+    p_send.add_argument("--sk-env", dest="sender_sk_env",
+                        help="Read sender key filter from this environment variable")
     p_send.add_argument("--fee", type=int, default=0, help="Transaction fee")
     p_send.add_argument("--asset-id", default=DEFAULT_ASSET_ID, help="Asset ID")
     p_send.add_argument("--no-block", action="store_true", help="Don't produce a block")
@@ -4055,7 +4151,8 @@ def main():
 
     # ── Auto-receive ─────────────────────────────────────────────────
     p_regkey = sub.add_parser("register-key", help="Register a key for auto-detecting incoming payments")
-    p_regkey.add_argument("sk", help="Spending key (hex)")
+    p_regkey.add_argument("sk", nargs="?", help="Spending key (hex). Prefer --sk-env for scripts.")
+    p_regkey.add_argument("--sk-env", help="Read spending key from this environment variable")
 
     p_scan = sub.add_parser("scan", help="Scan once for incoming payments")
     p_scan.add_argument("--batch-size", type=int, default=256, help="Max leaves to scan per batch")
@@ -4071,12 +4168,20 @@ def main():
     # ── Key management ─────────────────────────────────────────────────
     p_iseed = sub.add_parser("init-seed", help="Generate a new 24-word BIP-39 seed phrase")
     p_iseed.add_argument("--bip39-passphrase", default="", dest="bip39_passphrase",
-                         help="Optional BIP-39 passphrase (NOT the database passphrase)")
+                         help="UNSAFE argv optional BIP-39 passphrase (NOT the database passphrase)")
+    p_iseed.add_argument("--bip39-passphrase-env", dest="bip39_passphrase_env",
+                         help="Read optional BIP-39 passphrase from this environment variable")
 
     p_rseed = sub.add_parser("restore-seed", help="Restore wallet from a 24-word seed phrase")
-    p_rseed.add_argument("words", nargs="+", help="24 mnemonic words")
+    p_rseed.add_argument("words", nargs="*", help="UNSAFE argv mnemonic words. Prefer --words-stdin or --words-env.")
+    p_rseed.add_argument("--words-stdin", action="store_true",
+                         help="Read mnemonic words from stdin")
+    p_rseed.add_argument("--words-env",
+                         help="Read mnemonic words from this environment variable")
     p_rseed.add_argument("--bip39-passphrase", default="", dest="bip39_passphrase",
-                         help="Optional BIP-39 passphrase (NOT the database passphrase)")
+                         help="UNSAFE argv optional BIP-39 passphrase (NOT the database passphrase)")
+    p_rseed.add_argument("--bip39-passphrase-env", dest="bip39_passphrase_env",
+                         help="Read optional BIP-39 passphrase from this environment variable")
     p_rseed.add_argument("--recover-keys", type=int, default=10,
                          help="Number of key indices to re-derive (default: 10)")
 
@@ -4098,6 +4203,8 @@ def main():
     p_faucet = sub.add_parser("faucet", help="Get free testnet tokens (TNKL or sUSDC)")
     p_faucet.add_argument("--to-sk", help="Recipient sk (hex) — derives pk automatically")
     p_faucet.add_argument("--to-sk-env", help="Read recipient sk from this env var (safer than --to-sk)")
+    p_faucet.add_argument("--to-key-index", type=int,
+                          help="Recipient local wallet key index (keeps sk inside wallet process)")
     p_faucet.add_argument("--to-pk-x", help="Recipient pk_x (hex)")
     p_faucet.add_argument("--to-pk-y", help="Recipient pk_y (hex)")
     p_faucet.add_argument("--asset-id", default=DEFAULT_ASSET_ID,
@@ -4105,6 +4212,7 @@ def main():
     p_faucet.add_argument("--amount", type=int, default=None,
                           help="Override drip amount (default: 100 TNKL or 100 sUSDC)")
     p_faucet.add_argument("--from-sk", help="Faucet spending key (uses first available if omitted)")
+    p_faucet.add_argument("--from-sk-env", help="Read faucet spending key from this env var")
     p_faucet.add_argument("--cooldown", type=int, default=None,
                           help="Cooldown in seconds between drips to same address (default: 3600)")
     p_faucet.add_argument("--no-limit", action="store_true",
@@ -4120,9 +4228,13 @@ def main():
     p_create.add_argument("--asset-id", required=True, help="Unique asset ID (number)")
     p_create.add_argument("--decimals", type=int, default=0,
                           help="Decimal places (0 = whole units, 6 = like USDC). Default: 0")
-    p_create.add_argument("--authority-sk", help="Spending key authorized to mint this token")
+    p_create.add_argument("--authority-sk", help="UNSAFE argv authority key. Prefer --authority-key-index or --authority-sk-env.")
+    p_create.add_argument("--authority-sk-env",
+                          help="Read authority spending key from this environment variable")
+    p_create.add_argument("--authority-key-index", type=int,
+                          help="Use a local wallet key index as mint authority")
     p_create.add_argument("--initial-supply", type=int, default=0,
-                          help="Mint an initial supply (requires --authority-sk and node)")
+                          help="Mint an initial supply (requires an authority key and node)")
     p_create.add_argument("--num-notes", type=int, default=1,
                           help="Split initial supply across N notes (default: 1)")
 
@@ -4130,8 +4242,14 @@ def main():
     p_minttkn = sub.add_parser("mint-token", help="Mint additional supply of a custom token")
     p_minttkn.add_argument("--asset-id", required=True, help="Asset ID to mint")
     p_minttkn.add_argument("--amount", type=int, required=True, help="Amount to mint")
-    p_minttkn.add_argument("--authority-sk", help="Override authority key")
-    p_minttkn.add_argument("--recipient-sk", help="Recipient key (defaults to authority)")
+    p_minttkn.add_argument("--authority-sk", help="UNSAFE argv authority key. Prefer --authority-key-index or --authority-sk-env.")
+    p_minttkn.add_argument("--authority-sk-env",
+                           help="Read authority spending key from this environment variable")
+    p_minttkn.add_argument("--authority-key-index", type=int,
+                           help="Use a local wallet key index as mint authority")
+    p_minttkn.add_argument("--recipient-sk", help="UNSAFE argv recipient key (defaults to authority)")
+    p_minttkn.add_argument("--recipient-sk-env",
+                           help="Read recipient key from this environment variable")
     p_minttkn.add_argument("--num-notes", type=int, default=1,
                            help="Split mint across N notes (default: 1)")
 
@@ -4191,6 +4309,7 @@ def main():
     sub.add_parser("setup", help="Run the first-time wallet setup wizard")
 
     args = parser.parse_args()
+    _enforce_no_secret_argv(args, parser)
 
     # ── Resolve passphrase from stdin or env if requested ──
     if args.passphrase_stdin and not args.passphrase:
@@ -4201,6 +4320,25 @@ def main():
             args.passphrase = None
     elif args.passphrase_env and not args.passphrase:
         args.passphrase = os.environ.get(args.passphrase_env, None)
+
+    if hasattr(args, "bip39_passphrase_env") and args.bip39_passphrase_env and not args.bip39_passphrase:
+        args.bip39_passphrase = os.environ.get(args.bip39_passphrase_env, "")
+        if not args.bip39_passphrase:
+            parser.error(f"environment variable {args.bip39_passphrase_env} is not set or empty")
+
+    if args.command == "restore-seed":
+        if getattr(args, "words_env", None):
+            raw_words = os.environ.get(args.words_env, "")
+            if not raw_words.strip():
+                parser.error(f"environment variable {args.words_env} is not set or empty")
+            args.words = raw_words.split()
+        elif getattr(args, "words_stdin", False):
+            raw_words = sys.stdin.read()
+            if not raw_words.strip():
+                parser.error("no mnemonic words read from stdin")
+            args.words = raw_words.split()
+        if not getattr(args, "words", None):
+            parser.error("restore-seed requires --words-stdin or --words-env")
 
     db_path = Path(args.db)
     is_first_run = not db_path.exists()
@@ -4249,6 +4387,14 @@ def main():
             sys.exit(1)
     finally:
         wallet.close()
+
+
+def _resolve_derived_spending_key(wallet: NodeWallet, index: int) -> str:
+    """Resolve an existing derived key by index without printing or exporting it."""
+    for key in wallet.get_derived_keys():
+        if key["index"] == index:
+            return key["spending_sk"]
+    raise ValueError(f"No derived key found at index {index}. Run list-keys to see public addresses.")
 
 
 def _dispatch(args, wallet: NodeWallet):
@@ -4354,7 +4500,14 @@ def _dispatch(args, wallet: NodeWallet):
             print()
 
     elif cmd == "address":
-        pk_x, pk_y = wallet.derive_pk(args.sk)
+        sk = args.sk
+        if not sk and getattr(args, "sk_env", None):
+            sk = os.environ.get(args.sk_env, "")
+            if not sk:
+                raise ValueError(f"Environment variable {args.sk_env} is not set or empty")
+        if not sk:
+            raise ValueError("Spending key required. Use --sk-env to avoid shell history.")
+        pk_x, pk_y = wallet.derive_pk(sk)
         print()
         print(f"  Your address (derived from spending key):")
         print(f"    Public Key X: {pk_x}")
@@ -4364,8 +4517,15 @@ def _dispatch(args, wallet: NodeWallet):
         print()
 
     elif cmd == "import-note":
+        sk = args.sk
+        if not sk and getattr(args, "sk_env", None):
+            sk = os.environ.get(args.sk_env, "")
+            if not sk:
+                raise ValueError(f"Environment variable {args.sk_env} is not set or empty")
+        if not sk:
+            raise ValueError("Spending key required. Use --sk-env to avoid shell history.")
         note = wallet.import_note(
-            sk=args.sk,
+            sk=sk,
             value=args.value,
             rho=args.rho,
             asset_id=args.asset_id,
@@ -4379,7 +4539,14 @@ def _dispatch(args, wallet: NodeWallet):
         print()
 
     elif cmd == "import-mint":
-        sks = [s.strip() for s in args.sks.split(",")]
+        sks_raw = args.sks
+        if not sks_raw and getattr(args, "sks_env", None):
+            sks_raw = os.environ.get(args.sks_env, "")
+            if not sks_raw:
+                raise ValueError(f"Environment variable {args.sks_env} is not set or empty")
+        if not sks_raw:
+            raise ValueError("Spending keys required. Use --sks-env to avoid shell history.")
+        sks = [s.strip() for s in sks_raw.split(",")]
         values = [int(v.strip()) for v in args.values.split(",")]
         if len(sks) != len(values):
             raise ValueError(f"Number of keys ({len(sks)}) and values ({len(values)}) must match")
@@ -4402,12 +4569,23 @@ def _dispatch(args, wallet: NodeWallet):
         # Resolve recipient pk
         to_pk_x = args.to_pk_x
         to_pk_y = args.to_pk_y
-        if args.to_sk:
-            to_pk_x, to_pk_y = wallet.derive_pk(args.to_sk)
+        to_sk = args.to_sk
+        if not to_sk and getattr(args, "to_sk_env", None):
+            to_sk = os.environ.get(args.to_sk_env, "")
+            if not to_sk:
+                raise ValueError(f"Environment variable {args.to_sk_env} is not set or empty")
+        if to_sk:
+            to_pk_x, to_pk_y = wallet.derive_pk(to_sk)
         if not to_pk_x or not to_pk_y:
             raise ValueError(
-                "Recipient required: use --to-sk <hex> or --to-pk-x <hex> --to-pk-y <hex>"
+                "Recipient required: use --to-sk-env ENV or --to-pk-x <hex> --to-pk-y <hex>"
             )
+
+        sender_sk = args.sender_sk
+        if not sender_sk and getattr(args, "sender_sk_env", None):
+            sender_sk = os.environ.get(args.sender_sk_env, "")
+            if not sender_sk:
+                raise ValueError(f"Environment variable {args.sender_sk_env} is not set or empty")
 
         from_ids = None
         if args.from_ids:
@@ -4422,8 +4600,8 @@ def _dispatch(args, wallet: NodeWallet):
             to_pk_y=to_pk_y,
             to_value=args.amount,
             from_note_ids=from_ids,
-            sender_sk=args.sender_sk,
-            recipient_sk=args.to_sk,
+            sender_sk=sender_sk,
+            recipient_sk=to_sk,
             asset_id=args.asset_id,
             fee=args.fee,
             auto_block=not args.no_block,
@@ -4546,9 +4724,15 @@ def _dispatch(args, wallet: NodeWallet):
         print()
 
     elif cmd == "register-key":
-        scan_pk_hex = wallet.register_scan_key(args.sk)
+        sk = args.sk
+        if not sk and getattr(args, "sk_env", None):
+            sk = os.environ.get(args.sk_env)
+        if not sk:
+            raise ValueError("Spending key required. Prefer --sk-env for scripts.")
+        scan_pk_hex = wallet.register_scan_key(sk)
         print()
         print(f"  ✓ Scan key registered!")
+        print(f"    Scan public key: {scan_pk_hex[:32]}...")
         print(f"    Your wallet will now auto-detect incoming payments.")
         print(f"    Run 'scan' or 'watch' to check for new notes.")
         print()
@@ -4571,14 +4755,19 @@ def _dispatch(args, wallet: NodeWallet):
 
     elif cmd == "scan-keys":
         keys = wallet.get_scan_keys()
+        if args.json_output:
+            print(json.dumps({"status": "ok", "scan_keys": keys}))
+            return
         print()
         if not keys:
             print("  No scan keys registered.")
             print("  Use 'register-key <sk>' to enable auto-receive scanning.")
         else:
             print(f"  {len(keys)} scan key(s) registered:")
-            for k in keys:
-                print(f"    Key: {k['spending_sk'][:20]}...")
+            for i, k in enumerate(keys):
+                print(f"    Key #{i}:")
+                print(f"      Address: {k['pk_x'][:32]}...")
+                print(f"      Scan public key: {k['scan_pk_hex'][:32]}...")
         print()
 
     elif cmd == "watch":
@@ -4629,7 +4818,6 @@ def _dispatch(args, wallet: NodeWallet):
                 "status": "ok",
                 "mnemonic": mnemonic,
                 "key_index": 0,
-                "spending_sk": sk,
                 "pk_x": pk_x,
                 "pk_y": pk_y,
             }))
@@ -4723,7 +4911,6 @@ def _dispatch(args, wallet: NodeWallet):
                     pk_x, pk_y = wallet.derive_pk(dk["spending_sk"])
                     keys_out.append({
                         "index": dk["index"],
-                        "spending_sk": dk["spending_sk"],
                         "pk_x": pk_x,
                         "pk_y": pk_y,
                     })
@@ -4734,8 +4921,8 @@ def _dispatch(args, wallet: NodeWallet):
                 for dk in dkeys:
                     pk_x, pk_y = wallet.derive_pk(dk["spending_sk"])
                     print(f"    Key #{dk['index']}:")
-                    print(f"      Spending key (sk): {dk['spending_sk']}")
-                    print(f"      Address    (pk_x): {pk_x}")
+                    print(f"      Address (pk_x): {pk_x}")
+                    print(f"      Spending key: hidden")
                     print()
         print()
 
@@ -4777,12 +4964,15 @@ def _dispatch(args, wallet: NodeWallet):
             print()
 
     elif cmd == "faucet":
-        # Resolve recipient key (--to-sk-env reads from env var for security)
+        # Resolve recipient key. Prefer --to-key-index or --to-sk-env for scripts;
+        # --to-sk is kept for manual/testnet use but exposes the key in shell history.
         to_sk = args.to_sk
         if not to_sk and getattr(args, 'to_sk_env', None):
             to_sk = os.environ.get(args.to_sk_env, "")
             if not to_sk:
                 _friendly_error(f"Environment variable {args.to_sk_env} is not set or empty")
+        if not to_sk and getattr(args, "to_key_index", None) is not None:
+            to_sk = _resolve_derived_spending_key(wallet, args.to_key_index)
         if to_sk:
             pk_x, pk_y = wallet.crypto.derive_pk(to_sk)
         elif args.to_pk_x and args.to_pk_y:
@@ -4790,10 +4980,17 @@ def _dispatch(args, wallet: NodeWallet):
         else:
             print()
             print("  Please specify a recipient:")
-            print("    --to-sk <hex>                  (derives address automatically)")
+            print("    --to-key-index <n>             (local wallet key; safest)")
+            print("    --to-sk-env ENV                (derives address from env key)")
             print("    --to-pk-x <hex> --to-pk-y <hex> (explicit public key)")
             print()
             sys.exit(1)
+
+        from_sk = args.from_sk
+        if not from_sk and getattr(args, "from_sk_env", None):
+            from_sk = os.environ.get(args.from_sk_env)
+            if not from_sk:
+                _friendly_error(f"Environment variable {args.from_sk_env} is not set or empty")
 
         # Use the faucet wallet (separate from user's wallet) if it exists
         faucet_db = Path.home() / ".tonkl" / "faucet_wallet.db"
@@ -4813,9 +5010,10 @@ def _dispatch(args, wallet: NodeWallet):
             result = faucet_wallet.faucet_drip(
                 recipient_pk_x=pk_x,
                 recipient_pk_y=pk_y,
+                recipient_sk=to_sk,
                 asset_id=args.asset_id,
                 amount=args.amount,
-                sender_sk=args.from_sk,
+                sender_sk=from_sk,
                 cooldown=cooldown,
             )
         finally:
@@ -4830,7 +5028,7 @@ def _dispatch(args, wallet: NodeWallet):
         print()
 
         # Import the received note directly into the user's wallet
-        if faucet_wallet is not wallet and args.to_sk:
+        if faucet_wallet is not wallet and to_sk:
             try:
                 # The faucet_drip result has the tx info; we need the
                 # recipient tree index from the underlying send() result.
@@ -4848,7 +5046,7 @@ def _dispatch(args, wallet: NodeWallet):
                 # wallet's tx_history for the rho, or just re-derive.
                 # Simplest: import using the sk, which recomputes everything.
                 wallet.import_note(
-                    sk=args.to_sk,
+                    sk=to_sk,
                     value=result["amount"],
                     rho=result.get("out1_rho", str(int(time.time() * 1000) % 10**9 + 1)),
                     asset_id=result["asset_id"],
@@ -4879,12 +5077,18 @@ def _dispatch(args, wallet: NodeWallet):
         print()
         print(f"  Creating token {args.symbol.upper()}...")
 
+        authority_sk = args.authority_sk
+        if not authority_sk and getattr(args, "authority_sk_env", None):
+            authority_sk = os.environ.get(args.authority_sk_env)
+        if not authority_sk and getattr(args, "authority_key_index", None) is not None:
+            authority_sk = _resolve_derived_spending_key(wallet, args.authority_key_index)
+
         result = wallet.register_asset(
             asset_id=args.asset_id,
             symbol=args.symbol,
             name=args.name,
             decimals=args.decimals,
-            authority_sk=args.authority_sk,
+            authority_sk=authority_sk,
         )
 
         print()
@@ -4898,15 +5102,16 @@ def _dispatch(args, wallet: NodeWallet):
         print(f"  │  {id_line:<41} │")
         dec_line = f"Decimals:  {result['decimals']}"
         print(f"  │  {dec_line:<41} │")
-        auth_line = f"Authority: {'Set' if result['authority_sk'] else 'None (read-only)'}"
+        auth_line = f"Authority: {'Set' if result['has_authority'] else 'None (read-only)'}"
         print(f"  │  {auth_line:<41} │")
         print(f"  └────────────────────────────────────────────┘")
 
         # Mint initial supply if requested
         if args.initial_supply > 0:
-            if not args.authority_sk:
+            if not authority_sk:
                 print()
-                print("  ⚠ --initial-supply requires --authority-sk to mint.")
+                print("  ⚠ --initial-supply requires an authority key to mint.")
+                print("  Use --authority-key-index or --authority-sk-env.")
                 print("  Token registered but no supply minted.")
             else:
                 print()
@@ -4916,7 +5121,7 @@ def _dispatch(args, wallet: NodeWallet):
                 mint_result = wallet.mint_token(
                     asset_id=args.asset_id,
                     amount=args.initial_supply,
-                    authority_sk=args.authority_sk,
+                    authority_sk=authority_sk,
                     num_notes=args.num_notes,
                 )
 
@@ -4935,11 +5140,23 @@ def _dispatch(args, wallet: NodeWallet):
         print(f"  Minting {format_value(args.amount, args.asset_id)}...")
         print(f"  Generating proof (this may take a moment)...")
 
+        authority_sk = args.authority_sk
+        if not authority_sk and getattr(args, "authority_sk_env", None):
+            authority_sk = os.environ.get(args.authority_sk_env)
+        if not authority_sk and getattr(args, "authority_key_index", None) is not None:
+            authority_sk = _resolve_derived_spending_key(wallet, args.authority_key_index)
+
+        recipient_sk = args.recipient_sk
+        if not recipient_sk and getattr(args, "recipient_sk_env", None):
+            recipient_sk = os.environ.get(args.recipient_sk_env)
+            if not recipient_sk:
+                raise ValueError(f"Environment variable {args.recipient_sk_env} is not set or empty")
+
         result = wallet.mint_token(
             asset_id=args.asset_id,
             amount=args.amount,
-            authority_sk=args.authority_sk,
-            recipient_sk=args.recipient_sk,
+            authority_sk=authority_sk,
+            recipient_sk=recipient_sk,
             num_notes=args.num_notes,
         )
 
@@ -4963,6 +5180,9 @@ def _dispatch(args, wallet: NodeWallet):
 
     elif cmd == "list-tokens":
         custom = wallet.get_custom_assets()
+        if args.json_output:
+            print(json.dumps({"status": "ok", "tokens": custom}))
+            return
         print()
         if not custom:
             print("  No custom tokens registered.")
@@ -4973,7 +5193,7 @@ def _dispatch(args, wallet: NodeWallet):
             print(f"  {'ID':>4}  {'Symbol':<8}  {'Name':<20}  {'Decimals':>8}  {'Auth':>6}")
             print(f"  {'─'*4}  {'─'*8}  {'─'*20}  {'─'*8}  {'─'*6}")
             for a in custom:
-                auth = "Yes" if a["authority_sk"] else "No"
+                auth = "Yes" if a["has_authority"] else "No"
                 print(f"  {a['asset_id']:>4}  {a['symbol']:<8}  {a['name']:<20}  {a['decimals']:>8}  {auth:>6}")
         print()
 

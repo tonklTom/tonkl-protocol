@@ -111,6 +111,7 @@ echo "[3/6] Starting node with proof verification..."
     --port "$PORT" \
     --data-dir "$DATA_DIR" \
     --vk-dir "$VK_DIR" \
+    --allow-unauthenticated-rpc-local \
     2>&1 | sed 's/^/  [node] /' &
 NODE_PID=$!
 

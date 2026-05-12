@@ -15,6 +15,7 @@ Usage:
 """
 
 import os
+import json
 import signal
 import subprocess
 import sys
@@ -94,6 +95,23 @@ def read_commitments() -> list:
     return commitments
 
 
+def mint_policy_env() -> dict:
+    pi_bytes = MINT_PI.read_bytes()
+
+    def field_hex(index: int) -> str:
+        return "0x" + pi_bytes[index * 32 : (index + 1) * 32].hex()
+
+    env = os.environ.copy()
+    env["TONKL_MINT_AUTHORITIES"] = json.dumps({
+        str(int(field_hex(33), 16)): {
+            "pk_x": field_hex(34),
+            "pk_y": field_hex(35),
+            "max_supply": str(int(field_hex(32), 16)),
+        }
+    })
+    return env
+
+
 def start_node(vk_path: Path) -> subprocess.Popen:
     """Start the node and wait for it to be ready."""
     global data_dir
@@ -105,9 +123,11 @@ def start_node(vk_path: Path) -> subprocess.Popen:
             "--port", str(PORT),
             "--data-dir", data_dir,
             "--vk-dir", str(vk_path),
+            "--allow-unauthenticated-rpc-local",
         ],
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
+        env=mint_policy_env(),
     )
     return proc
 
