@@ -11,11 +11,11 @@
 //   consensus - Round-robin leader selection and auto block production
 //   p2p       - libp2p networking (gossipsub, mDNS, chain sync)
 
-pub mod state;
 pub mod block;
-pub mod mempool;
-pub mod rpc;
-pub mod verifier;
 pub mod consensus;
-pub mod p2p;
+pub mod mempool;
 pub mod node;
+pub mod p2p;
+pub mod rpc;
+pub mod state;
+pub mod verifier;

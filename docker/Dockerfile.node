@@ -9,6 +9,7 @@ WORKDIR /build
 # Copy workspace
 COPY tonkl-prover/ tonkl-prover/
 COPY tonkl-node/ tonkl-node/
+COPY tonkl-transfer/target/tonkl_transfer.json tonkl-transfer/target/tonkl_transfer.json
 
 # Build release binary
 RUN cd tonkl-node && cargo build --release

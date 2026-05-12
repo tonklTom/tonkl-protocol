@@ -18,9 +18,9 @@
 
 use crate::block::Transaction;
 use crate::state::NullifierSet;
-use tonkl_prover::{FieldElement, fe_to_be_32};
-use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::cmp::Ordering;
+use std::collections::{BinaryHeap, HashMap, HashSet};
+use tonkl_prover::{fe_to_be_32, FieldElement};
 
 // ─────────────────────────────────────────────────────────────────────
 // Mempool Entry
@@ -53,7 +53,8 @@ impl PartialOrd for MempoolEntry {
 impl Ord for MempoolEntry {
     fn cmp(&self, other: &Self) -> Ordering {
         // Higher fee first, then earlier arrival first
-        self.fee.cmp(&other.fee)
+        self.fee
+            .cmp(&other.fee)
             .then_with(|| other.sequence.cmp(&self.sequence))
     }
 }
@@ -126,6 +127,11 @@ impl Mempool {
         self.queue.is_empty()
     }
 
+    /// Iterate over pending transactions without draining the mempool.
+    pub fn transactions(&self) -> impl Iterator<Item = &Transaction> {
+        self.queue.iter().map(|entry| &entry.tx)
+    }
+
     /// Check whether a transaction with the given hex hash is pending in the mempool.
     /// Accepts both "0x"-prefixed and bare hex strings.
     pub fn contains_tx_hash(&self, tx_hash_hex: &str) -> bool {
@@ -161,7 +167,10 @@ impl Mempool {
         for nf in &tx.nullifiers {
             let nf_hex = format!("0x{}", hex::encode(fe_to_be_32(nf)));
 
-            if nullifier_set.contains(nf).map_err(|e| MempoolError::StateError(e.to_string()))? {
+            if nullifier_set
+                .contains(nf)
+                .map_err(|e| MempoolError::StateError(e.to_string()))?
+            {
                 return Err(MempoolError::SpentNullifier(nf_hex));
             }
 
@@ -328,7 +337,7 @@ mod tests {
         assert_eq!(drained.len(), 3);
         assert_eq!(drained[0].fee, 20); // highest fee
         assert_eq!(drained[1].fee, 10);
-        assert_eq!(drained[2].fee, 5);  // lowest fee
+        assert_eq!(drained[2].fee, 5); // lowest fee
 
         assert!(pool.is_empty());
     }

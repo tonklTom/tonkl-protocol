@@ -17,12 +17,13 @@ use std::process::{self, Command};
 use zeroize::Zeroize;
 
 use tonkl_prover::{
-    build_merkle_tree, derive_note_sk_hex, note_commitment, note_nullifier,
-    poseidon2_hash_2, serialize_witness_stack_msgpack, solve_witness, str_to_field,
-    wallet_derive_pk, FieldElement, NoteFields,
+    build_merkle_tree, derive_note_sk_hex, note_commitment, note_nullifier, poseidon2_hash_2,
+    serialize_witness_stack_msgpack, solve_witness, str_to_field, wallet_derive_pk, FieldElement,
+    NoteFields,
 };
 
 const EXPECTED_CIRCUIT_HASH: &str = env!("TONKL_CIRCUIT_HASH");
+const EXPECTED_CIRCUIT_HASH_SOURCE: &str = env!("TONKL_CIRCUIT_HASH_SOURCE");
 
 /// Tonkl Protocol -- in-process witness solver and prover.
 #[derive(Parser, Debug)]
@@ -103,10 +104,13 @@ fn main() {
 
     match &cli.command {
         Some(Commands::Witness { circuit, output }) => {
-            let circuit = circuit.as_ref().or(cli.circuit.as_ref()).unwrap_or_else(|| {
-                eprintln!("[tonkl-prover] --circuit is required");
-                process::exit(1);
-            });
+            let circuit = circuit
+                .as_ref()
+                .or(cli.circuit.as_ref())
+                .unwrap_or_else(|| {
+                    eprintln!("[tonkl-prover] --circuit is required");
+                    process::exit(1);
+                });
             let output = output.as_ref().or(cli.output.as_ref()).unwrap_or_else(|| {
                 eprintln!("[tonkl-prover] --output is required");
                 process::exit(1);
@@ -120,10 +124,13 @@ fn main() {
             vk,
             skip_verify,
         }) => {
-            let circuit = circuit.as_ref().or(cli.circuit.as_ref()).unwrap_or_else(|| {
-                eprintln!("[tonkl-prover] --circuit is required");
-                process::exit(1);
-            });
+            let circuit = circuit
+                .as_ref()
+                .or(cli.circuit.as_ref())
+                .unwrap_or_else(|| {
+                    eprintln!("[tonkl-prover] --circuit is required");
+                    process::exit(1);
+                });
             let output = output.as_ref().or(cli.output.as_ref()).unwrap_or_else(|| {
                 eprintln!("[tonkl-prover] --output is required");
                 process::exit(1);
@@ -228,8 +235,10 @@ fn cmd_prove(
         let status = Command::new(bb_path)
             .args([
                 "write_vk",
-                "-b", &circuit_path.to_string_lossy(),
-                "-o", &vk_dir.to_string_lossy(),
+                "-b",
+                &circuit_path.to_string_lossy(),
+                "-o",
+                &vk_dir.to_string_lossy(),
             ])
             .status()
             .unwrap_or_else(|e| {
@@ -253,10 +262,14 @@ fn cmd_prove(
 
     let mut prove_args = vec![
         "prove".to_string(),
-        "-b".to_string(), circuit_path.to_string_lossy().to_string(),
-        "-w".to_string(), witness_tmp.to_string_lossy().to_string(),
-        "-o".to_string(), proof_dir.to_string_lossy().to_string(),
-        "-k".to_string(), vk_file.to_string_lossy().to_string(),
+        "-b".to_string(),
+        circuit_path.to_string_lossy().to_string(),
+        "-w".to_string(),
+        witness_tmp.to_string_lossy().to_string(),
+        "-o".to_string(),
+        proof_dir.to_string_lossy().to_string(),
+        "-k".to_string(),
+        vk_file.to_string_lossy().to_string(),
     ];
     if !skip_verify {
         prove_args.push("--verify".to_string());
@@ -293,9 +306,12 @@ fn cmd_prove(
         let status = Command::new(bb_path)
             .args([
                 "verify",
-                "-k", &vk_file.to_string_lossy(),
-                "-p", &proof_file.to_string_lossy(),
-                "-i", &pub_inputs_file.to_string_lossy(),
+                "-k",
+                &vk_file.to_string_lossy(),
+                "-p",
+                &proof_file.to_string_lossy(),
+                "-i",
+                &pub_inputs_file.to_string_lossy(),
             ])
             .status()
             .unwrap_or_else(|e| {
@@ -334,7 +350,9 @@ fn cmd_compute() {
     });
 
     let op = json["op"].as_str().unwrap_or_else(|| {
-        eprintln!("[tonkl-prover] Missing 'op' field. Use: commitment, nullifier, derive_pk, full_note");
+        eprintln!(
+            "[tonkl-prover] Missing 'op' field. Use: commitment, nullifier, derive_pk, full_note"
+        );
         process::exit(1);
     });
 
@@ -477,10 +495,13 @@ fn cmd_compute() {
 }
 
 fn parse_field(json: &serde_json::Value, name: &str) -> FieldElement {
-    let s = json[name].as_str().or_else(|| json[name].as_u64().map(|_| "")).unwrap_or_else(|| {
-        eprintln!("[tonkl-prover] compute: missing field '{name}'");
-        process::exit(1);
-    });
+    let s = json[name]
+        .as_str()
+        .or_else(|| json[name].as_u64().map(|_| ""))
+        .unwrap_or_else(|| {
+            eprintln!("[tonkl-prover] compute: missing field '{name}'");
+            process::exit(1);
+        });
     // Handle numeric JSON values
     if s.is_empty() {
         let n = json[name].as_u64().unwrap();
@@ -519,10 +540,7 @@ fn read_stdin_and_circuit(circuit_path: &Path) -> (SensitiveInput, String) {
     }
 
     let circuit_json = fs::read_to_string(circuit_path).unwrap_or_else(|e| {
-        eprintln!(
-            "[tonkl-prover] Cannot read {}: {e}",
-            circuit_path.display()
-        );
+        eprintln!("[tonkl-prover] Cannot read {}: {e}", circuit_path.display());
         process::exit(1);
     });
 
@@ -570,10 +588,7 @@ fn write_file(path: &Path, data: &[u8]) {
         fs::create_dir_all(parent).ok();
     }
     fs::write(path, data).unwrap_or_else(|e| {
-        eprintln!(
-            "[tonkl-prover] Cannot write {}: {e}",
-            path.display()
-        );
+        eprintln!("[tonkl-prover] Cannot write {}: {e}", path.display());
         process::exit(1);
     });
 }
@@ -602,10 +617,7 @@ fn secure_delete(path: &Path) {
         }
     }
     let _ = fs::remove_file(path);
-    eprintln!(
-        "[tonkl-prover] Secure deleted: {}",
-        path.display()
-    );
+    eprintln!("[tonkl-prover] Secure deleted: {}", path.display());
 }
 
 fn default_bb_path() -> PathBuf {
@@ -632,9 +644,7 @@ fn maybe_apply_hd_derivation(raw_json: &str) -> String {
     let indices = match parsed.get("_note_indices") {
         Some(v) => v,
         None => {
-            eprintln!(
-                "[tonkl-prover] HD mode: _master_seed_hex present but _note_indices missing"
-            );
+            eprintln!("[tonkl-prover] HD mode: _master_seed_hex present but _note_indices missing");
             process::exit(1);
         }
     };
@@ -703,10 +713,20 @@ fn parse_hex_seed(hex_str: &str) -> [u8; 64] {
 
 fn verify_circuit_hash(circuit_bytes: &[u8]) {
     if EXPECTED_CIRCUIT_HASH == "unchecked" {
+        let allow_unchecked = std::env::var("TONKL_ALLOW_UNCHECKED_CIRCUIT_HASH")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+        if !allow_unchecked {
+            eprintln!("[tonkl-prover] Circuit hash check is disabled in this binary.");
+            eprintln!("  This binary was built without a resolvable circuit artifact.");
+            eprintln!("  Rebuild with TONKL_CIRCUIT_PATH set to the intended JSON artifact.");
+            eprintln!("  For local development only, set TONKL_ALLOW_UNCHECKED_CIRCUIT_HASH=1.");
+            process::exit(1);
+        }
+
         eprintln!(
             "[tonkl-prover] WARNING: circuit hash check is disabled \
-             (built without TONKL_CIRCUIT_PATH resolvable). \
-             Rebuild with the circuit JSON present to enable."
+             because TONKL_ALLOW_UNCHECKED_CIRCUIT_HASH is set."
         );
         return;
     }
@@ -720,7 +740,8 @@ fn verify_circuit_hash(circuit_bytes: &[u8]) {
         eprintln!("[tonkl-prover] Circuit hash mismatch -- refusing to run.");
         eprintln!("  expected (compile-time): {EXPECTED_CIRCUIT_HASH}");
         eprintln!("  actual   (runtime)     : {actual_hex}");
-        eprintln!("  Rebuild tonkl-prover against the intended circuit.");
+        eprintln!("  source   (build-time)  : {EXPECTED_CIRCUIT_HASH_SOURCE}");
+        eprintln!("  Rebuild tonkl-prover against the intended circuit or set TONKL_CIRCUIT_PATH.");
         process::exit(1);
     }
     eprintln!("[tonkl-prover] Circuit hash OK ({})", &actual_hex[..16]);

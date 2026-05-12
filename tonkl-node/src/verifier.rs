@@ -76,14 +76,20 @@ impl ProofVerifier {
             // Try: vk_dir/<name>.vk (flat layout)
             let vk_path_flat = vk_dir.join(format!("{}.vk", name));
             if vk_path_flat.exists() {
-                let bytes = std::fs::read(&vk_path_flat)
-                    .map_err(|e| format!("failed to read VK at {}: {}", vk_path_flat.display(), e))?;
+                let bytes = std::fs::read(&vk_path_flat).map_err(|e| {
+                    format!("failed to read VK at {}: {}", vk_path_flat.display(), e)
+                })?;
                 info!("Loaded VK for {}: {} bytes", name, bytes.len());
                 vk_map.insert(*tx_type, bytes);
                 continue;
             }
 
-            warn!("No VK found for {} circuit (checked {} and {})", name, vk_path.display(), vk_path_flat.display());
+            warn!(
+                "No VK found for {} circuit (checked {} and {})",
+                name,
+                vk_path.display(),
+                vk_path_flat.display()
+            );
         }
 
         if vk_map.is_empty() {
@@ -121,13 +127,13 @@ impl ProofVerifier {
             return Ok(());
         }
 
-        let vk = self.vk_map.get(&tx_type).ok_or_else(|| {
-            format!("no verification key loaded for {:?} circuit", tx_type)
-        })?;
+        let vk = self
+            .vk_map
+            .get(&tx_type)
+            .ok_or_else(|| format!("no verification key loaded for {:?} circuit", tx_type))?;
 
         // Create temp directory for verification artifacts
-        let tmp = TempDir::new()
-            .map_err(|e| format!("failed to create temp dir: {}", e))?;
+        let tmp = TempDir::new().map_err(|e| format!("failed to create temp dir: {}", e))?;
 
         let vk_path = tmp.path().join("vk");
         let proof_path = tmp.path().join("proof");
@@ -142,9 +148,12 @@ impl ProofVerifier {
         let output = Command::new(&self.bb_path)
             .args([
                 "verify",
-                "-k", &vk_path.to_string_lossy(),
-                "-p", &proof_path.to_string_lossy(),
-                "-i", &inputs_path.to_string_lossy(),
+                "-k",
+                &vk_path.to_string_lossy(),
+                "-p",
+                &proof_path.to_string_lossy(),
+                "-i",
+                &inputs_path.to_string_lossy(),
             ])
             .output()
             .map_err(|e| format!("failed to execute bb verify: {} (is bb in PATH?)", e))?;
@@ -185,10 +194,14 @@ pub fn serialize_public_inputs(hex_inputs: &[String]) -> Result<Vec<u8>, String>
     let mut bytes = Vec::with_capacity(hex_inputs.len() * 32);
     for (i, hex_str) in hex_inputs.iter().enumerate() {
         let clean = hex_str.strip_prefix("0x").unwrap_or(hex_str);
-        let decoded = hex::decode(clean)
-            .map_err(|e| format!("invalid hex in public_input[{}]: {}", i, e))?;
+        let decoded =
+            hex::decode(clean).map_err(|e| format!("invalid hex in public_input[{}]: {}", i, e))?;
         if decoded.len() > 32 {
-            return Err(format!("public_input[{}] too large: {} bytes", i, decoded.len()));
+            return Err(format!(
+                "public_input[{}] too large: {} bytes",
+                i,
+                decoded.len()
+            ));
         }
         // Left-pad to 32 bytes
         let mut padded = [0u8; 32];

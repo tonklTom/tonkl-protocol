@@ -16,7 +16,7 @@ use crate::state::field_to_hex;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::RwLock;
-use tracing::{info, warn, debug};
+use tracing::{debug, info, warn};
 
 // ─────────────────────────────────────────────────────────────────────
 // Validator set
@@ -159,10 +159,7 @@ pub async fn run_block_producer(
 }
 
 /// Attempt to produce a block if this node is the current leader.
-async fn produce_block_if_leader(
-    state: &Arc<RwLock<NodeState>>,
-    config: &ConsensusConfig,
-) {
+async fn produce_block_if_leader(state: &Arc<RwLock<NodeState>>, config: &ConsensusConfig) {
     let next_block = {
         let s = state.read().await;
         s.block_builder.next_block_number()
@@ -185,6 +182,11 @@ async fn produce_block_if_leader(
 
     if txs.is_empty() && !config.produce_empty_blocks {
         debug!("No pending transactions, skipping block #{}", next_block);
+        return;
+    }
+
+    if let Err(e) = s.mint_policy.validate_block_mints(&s.chain_meta, &txs) {
+        warn!("Mint policy rejected block #{}: {}", next_block, e);
         return;
     }
 
@@ -220,10 +222,24 @@ async fn produce_block_if_leader(
     // Index confirmed transactions
     for tx in &block.transactions {
         let tx_hash_hex = format!("0x{}", hex::encode(tx.tx_hash));
-        s.tx_index.insert(tx_hash_hex, crate::rpc::ConfirmedTx {
-            block_number: header.block_number,
-            tx_type: tx.tx_type,
-        });
+        s.tx_index.insert(
+            tx_hash_hex,
+            crate::rpc::ConfirmedTx {
+                block_number: header.block_number,
+                tx_type: tx.tx_type,
+            },
+        );
+    }
+
+    if let Err(e) = s
+        .mint_policy
+        .record_block_mints(&s.chain_meta, &block.transactions)
+    {
+        warn!(
+            "Failed to persist mint supply for block #{}: {}",
+            header.block_number, e
+        );
+        return;
     }
 
     info!(

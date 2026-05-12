@@ -58,6 +58,11 @@ hex = "0.4"
 # Also used by the build script for the same hash computation.
 blake3 = "1"
 
+# HD note key derivation parity with the Python wallet:
+# hashlib.pbkdf2_hmac("sha512", domain || seed || index, domain, 1).
+hmac = "0.13"
+sha2 = "0.11"
+
 [build-dependencies]
 blake3 = "1"
 

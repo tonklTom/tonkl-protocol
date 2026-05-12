@@ -11,10 +11,12 @@ use acvm::pwg::ACVM;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
 use bn254_blackbox_solver::Bn254BlackBoxSolver;
+use hmac::{Hmac, KeyInit, Mac};
 use noirc_abi::input_parser::InputValue;
 use noirc_abi::Abi;
 use num_bigint::BigUint;
 use serde_json::Value;
+use sha2::Sha512;
 use std::collections::BTreeMap;
 
 use acvm_blackbox_solver::BlackBoxFunctionSolver;
@@ -62,11 +64,7 @@ pub fn poseidon2_hash_2(a: FieldElement, b: FieldElement) -> Result<FieldElement
 
 /// 3-input Poseidon2 hash. Used for nullifier: hash(DOMAIN, cm, sk).
 /// Matches `hash_3(a, b, c)` in hash.nr.
-pub fn poseidon2_hash_3(
-    a: FieldElement,
-    b: FieldElement,
-    c: FieldElement,
-) -> Result<FieldElement> {
+pub fn poseidon2_hash_3(a: FieldElement, b: FieldElement, c: FieldElement) -> Result<FieldElement> {
     let state = p2([a, b, c, FieldElement::zero()])?;
     Ok(state[0])
 }
@@ -172,13 +170,19 @@ pub fn wallet_derive_pk(sk: FieldElement) -> Result<(FieldElement, FieldElement)
 
     let sk_lo = FieldElement::from_hex(&format!(
         "0x{}",
-        sk_lo_bytes.iter().map(|b| format!("{b:02x}")).collect::<String>()
+        sk_lo_bytes
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<String>()
     ))
     .ok_or("Failed to parse sk_lo")?;
 
     let sk_hi = FieldElement::from_hex(&format!(
         "0x{}",
-        sk_hi_bytes.iter().map(|b| format!("{b:02x}")).collect::<String>()
+        sk_hi_bytes
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<String>()
     ))
     .ok_or("Failed to parse sk_hi")?;
 
@@ -268,8 +272,14 @@ pub fn build_merkle_tree(leaves: &[FieldElement]) -> Result<MerkleTreeResult> {
             if seen_parents.insert(parent_idx) {
                 let left_idx = parent_idx * 2;
                 let right_idx = parent_idx * 2 + 1;
-                let left = current.get(&left_idx).copied().unwrap_or(FieldElement::zero());
-                let right = current.get(&right_idx).copied().unwrap_or(FieldElement::zero());
+                let left = current
+                    .get(&left_idx)
+                    .copied()
+                    .unwrap_or(FieldElement::zero());
+                let right = current
+                    .get(&right_idx)
+                    .copied()
+                    .unwrap_or(FieldElement::zero());
                 let parent = poseidon2_hash_2(left, right)?;
                 next.insert(parent_idx, parent);
             }
@@ -309,10 +319,14 @@ pub fn build_merkle_tree(leaves: &[FieldElement]) -> Result<MerkleTreeResult> {
 
 // -- HD Key Derivation -------------------------------------------------------
 //
-// Derives note spending keys from a BIP-39 master seed using BLAKE3.
-// Formula matches secure_key_manager.py exactly:
+// Derives note spending keys from a BIP-39 master seed using the exact Python
+// wallet formula:
 //
-//   sk = BLAKE3(DOMAIN || master_seed || note_index_be8) mod BN254_P
+//   sk = PBKDF2-HMAC-SHA512(
+//       password = DOMAIN || master_seed || note_index_be8,
+//       salt = DOMAIN,
+//       iterations = 1,
+//   )[0..32] mod BN254_P
 //
 // where:
 //   DOMAIN       = b"Tonkl::note_sk_v1"  (versioned domain tag)
@@ -332,7 +346,7 @@ const BN254_P_DECIMAL: &str =
 /// Derive a note spending key from a master seed and note index.
 ///
 /// Returns the 32-byte big-endian representation of:
-///   BLAKE3(DOMAIN || seed || index.to_be_bytes()) mod BN254_P
+///   PBKDF2-HMAC-SHA512(DOMAIN || seed || index, DOMAIN, 1)[0..32] mod BN254_P
 ///
 /// The caller is responsible for zeroizing the returned buffer and
 /// the master_seed when no longer needed.
@@ -346,19 +360,29 @@ pub fn derive_note_sk(master_seed: &[u8], note_index: u64) -> [u8; 32] {
         "master_seed must be exactly 64 bytes (512-bit BIP-39 seed)"
     );
 
-    // Construct BLAKE3 input: domain || seed || index
-    let mut input = Vec::with_capacity(DERIVATION_DOMAIN.len() + 64 + 8);
-    input.extend_from_slice(DERIVATION_DOMAIN);
-    input.extend_from_slice(master_seed);
-    input.extend_from_slice(&note_index.to_be_bytes());
+    // Python parity:
+    // hashlib.pbkdf2_hmac("sha512", derive_input, DERIVATION_DOMAIN, 1)[:32]
+    let mut derive_input = Vec::with_capacity(DERIVATION_DOMAIN.len() + 64 + 8);
+    derive_input.extend_from_slice(DERIVATION_DOMAIN);
+    derive_input.extend_from_slice(master_seed);
+    derive_input.extend_from_slice(&note_index.to_be_bytes());
 
-    let hash = blake3::hash(&input);
-    input.zeroize();
+    let mut mac = <Hmac<Sha512> as KeyInit>::new_from_slice(&derive_input)
+        .expect("HMAC accepts keys of any length");
+    mac.update(DERIVATION_DOMAIN);
+    mac.update(&1u32.to_be_bytes());
+    derive_input.zeroize();
+
+    let mut pbkdf2_block = mac.finalize().into_bytes();
+    let mut raw_hash = [0u8; 32];
+    raw_hash.copy_from_slice(&pbkdf2_block[..32]);
+    pbkdf2_block.as_mut_slice().zeroize();
 
     // Reduce mod BN254_P (matches Python: int.from_bytes(raw, "big") % BN254_P)
-    let n = BigUint::from_bytes_be(hash.as_bytes());
-    let p = BigUint::parse_bytes(BN254_P_DECIMAL.as_bytes(), 10)
-        .expect("BN254_P constant is valid");
+    let n = BigUint::from_bytes_be(&raw_hash);
+    raw_hash.zeroize();
+    let p =
+        BigUint::parse_bytes(BN254_P_DECIMAL.as_bytes(), 10).expect("BN254_P constant is valid");
     let reduced = n % p;
 
     // Convert to 32-byte big-endian, zero-padded on the left
@@ -635,9 +659,7 @@ pub fn json_to_input_value(v: &Value, name: &str) -> Result<InputValue> {
                 .collect();
             Ok(InputValue::Vec(fields?))
         }
-        other => Err(format!(
-            "Unsupported JSON type for '{name}': {other:?}"
-        )),
+        other => Err(format!("Unsupported JSON type for '{name}': {other:?}")),
     }
 }
 
@@ -658,9 +680,8 @@ pub fn str_to_field(s: &str, name: &str) -> Result<FieldElement> {
     }
 
     if trimmed.starts_with("0x") || trimmed.starts_with("0X") {
-        FieldElement::from_hex(trimmed).ok_or_else(|| {
-            format!("Cannot parse '{name}' hex value '{trimmed}' as field")
-        })
+        FieldElement::from_hex(trimmed)
+            .ok_or_else(|| format!("Cannot parse '{name}' hex value '{trimmed}' as field"))
     } else {
         match trimmed.parse::<u128>() {
             Ok(n) => Ok(FieldElement::from(n)),
@@ -670,9 +691,7 @@ pub fn str_to_field(s: &str, name: &str) -> Result<FieldElement> {
                     .map_err(|e| format!("Cannot parse '{name}' value '{trimmed}': {e}"))?;
                 let hex_str = format!("0x{}", big.to_str_radix(16));
                 FieldElement::from_hex(&hex_str).ok_or_else(|| {
-                    format!(
-                        "Decimal value '{trimmed}' for '{name}' overflows BN254 field"
-                    )
+                    format!("Decimal value '{trimmed}' for '{name}' overflows BN254 field")
                 })
             }
         }
@@ -823,14 +842,11 @@ mod tests {
 
     #[test]
     fn serialize_851_entries_matches_reference_prefix() {
-        let entries: Vec<(u32, [u8; 32])> =
-            (0..851u32).map(|i| (i, [0u8; 32])).collect();
+        let entries: Vec<(u32, [u8; 32])> = (0..851u32).map(|i| (i, [0u8; 32])).collect();
         let out = serialize_witness_stack_msgpack(&entries);
         assert_eq!(
             &out[..12],
-            &[
-                0x03, 0x91, 0x91, 0x92, 0x00, 0xde, 0x03, 0x53, 0x00, 0xc4, 0x20, 0x00
-            ]
+            &[0x03, 0x91, 0x91, 0x92, 0x00, 0xde, 0x03, 0x53, 0x00, 0xc4, 0x20, 0x00]
         );
     }
 
@@ -947,10 +963,7 @@ mod tests {
         // Verify sk < BN254_P by parsing both as BigUint
         let sk_int = BigUint::from_bytes_be(&sk);
         let p = BigUint::parse_bytes(BN254_P_DECIMAL.as_bytes(), 10).unwrap();
-        assert!(
-            sk_int < p,
-            "derived sk must be reduced mod BN254_P"
-        );
+        assert!(sk_int < p, "derived sk must be reduced mod BN254_P");
     }
 
     #[test]
@@ -973,8 +986,11 @@ mod tests {
         let sk = derive_note_sk(&seed, 0);
         // Just verify it doesn't panic and produces 32 bytes
         assert_eq!(sk.len(), 32);
-        // Should not be all zeros (BLAKE3 of non-empty input is non-zero)
-        assert!(sk.iter().any(|&b| b != 0), "derived sk should not be all zeros");
+        // Should not be all zeros (PBKDF2-HMAC-SHA512 of non-empty input is non-zero)
+        assert!(
+            sk.iter().any(|&b| b != 0),
+            "derived sk should not be all zeros"
+        );
     }
 
     #[test]
@@ -1008,16 +1024,8 @@ mod tests {
 
     #[test]
     fn poseidon2_hash_2_different_inputs_differ() {
-        let h1 = poseidon2_hash_2(
-            FieldElement::from(1u128),
-            FieldElement::from(2u128),
-        )
-        .unwrap();
-        let h2 = poseidon2_hash_2(
-            FieldElement::from(1u128),
-            FieldElement::from(3u128),
-        )
-        .unwrap();
+        let h1 = poseidon2_hash_2(FieldElement::from(1u128), FieldElement::from(2u128)).unwrap();
+        let h2 = poseidon2_hash_2(FieldElement::from(1u128), FieldElement::from(3u128)).unwrap();
         assert_ne!(h1, h2);
     }
 
@@ -1041,16 +1049,22 @@ mod tests {
     #[test]
     fn poseidon2_hash_7_is_deterministic() {
         let h1 = poseidon2_hash_7(
-            FieldElement::from(1u128), FieldElement::from(2u128),
-            FieldElement::from(3u128), FieldElement::from(4u128),
-            FieldElement::from(5u128), FieldElement::from(6u128),
+            FieldElement::from(1u128),
+            FieldElement::from(2u128),
+            FieldElement::from(3u128),
+            FieldElement::from(4u128),
+            FieldElement::from(5u128),
+            FieldElement::from(6u128),
             FieldElement::from(7u128),
         )
         .unwrap();
         let h2 = poseidon2_hash_7(
-            FieldElement::from(1u128), FieldElement::from(2u128),
-            FieldElement::from(3u128), FieldElement::from(4u128),
-            FieldElement::from(5u128), FieldElement::from(6u128),
+            FieldElement::from(1u128),
+            FieldElement::from(2u128),
+            FieldElement::from(3u128),
+            FieldElement::from(4u128),
+            FieldElement::from(5u128),
+            FieldElement::from(6u128),
             FieldElement::from(7u128),
         )
         .unwrap();
@@ -1140,8 +1154,9 @@ mod tests {
         );
     }
 
-    // -- Cross-language parity (pinned against Python secure_key_manager.py) --
-    // Generated by scripts/generate_hd_test_vectors.py using BLAKE3.
+    // -- Cross-language parity (pinned against Python tonkl_wallet.py) --
+    // Generated by scripts/generate_hd_test_vectors.py using the wallet's
+    // PBKDF2-HMAC-SHA512 derivation.
 
     #[test]
     fn derive_note_sk_cross_language_parity() {
@@ -1149,50 +1164,50 @@ mod tests {
         assert_eq!(
             derive_note_sk(&[0xABu8; 64], 0),
             [
-                0x18, 0xdc, 0x8c, 0x86, 0xea, 0x13, 0xfd, 0x3c,
-                0xcf, 0xb6, 0xa8, 0x17, 0xce, 0xbd, 0x58, 0xf3,
-                0x55, 0xe3, 0xde, 0xdd, 0xd2, 0x66, 0x9e, 0xbf,
-                0xb7, 0x50, 0xa6, 0xfb, 0x79, 0x54, 0x65, 0x87,
+                0x0a, 0xbf, 0x9e, 0x88, 0x7e, 0x41, 0xb3, 0xe0,
+                0x01, 0xcf, 0x16, 0xb0, 0x7a, 0x15, 0xdd, 0x0d,
+                0xfa, 0x4c, 0x13, 0xf4, 0x45, 0x68, 0xc0, 0xb7,
+                0x01, 0x4c, 0x98, 0xf0, 0x5b, 0x78, 0xa8, 0xc3,
             ]
         );
         // all-0xAB seed, index 1
         assert_eq!(
             derive_note_sk(&[0xABu8; 64], 1),
             [
-                0x0f, 0x59, 0x3b, 0xd0, 0x90, 0xca, 0x44, 0xe0,
-                0x0e, 0x40, 0xac, 0x1c, 0x64, 0xa5, 0xe1, 0x77,
-                0xc9, 0xfb, 0xb8, 0x3e, 0xe1, 0x4c, 0xbc, 0xdf,
-                0x9a, 0x29, 0xc0, 0xc6, 0x2c, 0x07, 0xf3, 0xc2,
+                0x0e, 0x86, 0xcc, 0x4c, 0x71, 0x45, 0x79, 0x67,
+                0x1d, 0xc3, 0x81, 0x84, 0x87, 0x6c, 0x06, 0x88,
+                0x2d, 0xdb, 0x49, 0xd0, 0x8f, 0x27, 0x16, 0x17,
+                0x85, 0xee, 0x18, 0x84, 0x6b, 0x2c, 0x9f, 0xaa,
             ]
         );
         // all-0x42 seed, index 0
         assert_eq!(
             derive_note_sk(&[0x42u8; 64], 0),
             [
-                0x1e, 0x60, 0x6c, 0x10, 0xb3, 0x40, 0x92, 0x94,
-                0x9a, 0xf6, 0x11, 0x60, 0x21, 0xf0, 0x1a, 0x7b,
-                0xdc, 0xe5, 0xd4, 0xe0, 0x82, 0x93, 0x9e, 0x7d,
-                0x6c, 0x66, 0xbb, 0xe7, 0x61, 0x7a, 0x25, 0x61,
+                0x1d, 0xc3, 0x8b, 0x40, 0x38, 0xf2, 0xd0, 0xa7,
+                0x40, 0x88, 0xb8, 0x28, 0x9a, 0x9a, 0x97, 0x1d,
+                0x54, 0x2a, 0xa2, 0xe6, 0x12, 0x89, 0x28, 0x23,
+                0x99, 0x09, 0x39, 0x49, 0x78, 0x52, 0xa3, 0x53,
             ]
         );
         // all-0x42 seed, index 99
         assert_eq!(
             derive_note_sk(&[0x42u8; 64], 99),
             [
-                0x2e, 0x25, 0x60, 0x78, 0x44, 0x49, 0x9a, 0xe3,
-                0xae, 0x82, 0x49, 0xba, 0xb8, 0xbf, 0x42, 0x9a,
-                0x3a, 0xe0, 0xcb, 0x99, 0x82, 0xf7, 0xa7, 0xd5,
-                0x61, 0xd1, 0x30, 0xcf, 0x97, 0x0a, 0xbb, 0x4a,
+                0x14, 0xad, 0x18, 0xf3, 0x52, 0x7e, 0x7f, 0x41,
+                0x2e, 0xd5, 0xc0, 0x3c, 0x98, 0xe3, 0x23, 0xd7,
+                0x16, 0x50, 0xc9, 0x26, 0x58, 0x8c, 0xe1, 0xf3,
+                0x44, 0xa3, 0x9a, 0xff, 0xd0, 0x40, 0x18, 0x81,
             ]
         );
         // all-zero seed, index 0
         assert_eq!(
             derive_note_sk(&[0x00u8; 64], 0),
             [
-                0x0d, 0xc8, 0x6d, 0x56, 0x61, 0xff, 0x52, 0x64,
-                0xef, 0xa0, 0x73, 0xc7, 0x54, 0xcf, 0x79, 0x0d,
-                0x1a, 0x42, 0x48, 0xde, 0xdb, 0x1e, 0xd0, 0xa5,
-                0x07, 0x29, 0xce, 0xda, 0x43, 0x77, 0x70, 0x71,
+                0x28, 0x6f, 0xc5, 0x81, 0xe7, 0xbe, 0xca, 0x03,
+                0x43, 0x19, 0x22, 0x96, 0x3c, 0xf9, 0x71, 0x28,
+                0x8c, 0xd6, 0x0a, 0xa1, 0xf7, 0x74, 0xf4, 0xfa,
+                0xca, 0x48, 0xf2, 0xdb, 0x1e, 0xec, 0x8a, 0x2b,
             ]
         );
     }
@@ -1214,7 +1229,10 @@ mod tests {
 
         // Path should be all zeros (no siblings)
         assert_eq!(result.paths.len(), 1);
-        assert!(result.paths[0].siblings.iter().all(|s| *s == FieldElement::zero()));
+        assert!(result.paths[0]
+            .siblings
+            .iter()
+            .all(|s| *s == FieldElement::zero()));
         assert!(result.paths[0].index_bits.iter().all(|b| !b));
     }
 
@@ -1282,7 +1300,9 @@ mod tests {
         // Leaf 0 siblings: [leaves[1], h23, 0, 0, ...]
         assert_eq!(result.paths[0].siblings[0], leaves[1]);
         assert_eq!(result.paths[0].siblings[1], h23);
-        assert!(result.paths[0].siblings[2..].iter().all(|s| *s == FieldElement::zero()));
+        assert!(result.paths[0].siblings[2..]
+            .iter()
+            .all(|s| *s == FieldElement::zero()));
 
         // Leaf 2 siblings: [leaves[3], h01, 0, 0, ...]
         assert_eq!(result.paths[2].siblings[0], leaves[3]);

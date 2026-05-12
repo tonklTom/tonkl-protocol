@@ -9,18 +9,18 @@
 //!   1. $TONKL_CIRCUIT_PATH (absolute or relative to the prover crate root)
 //!   2. ../tonkl-transfer/target/tonkl_transfer.json  (default)
 //!
-//! If the file doesn't exist at build time, the baked hash is the literal
-//! string "unchecked" and the runtime check is skipped with a warning.
-//! This keeps `cargo check` / `cargo test` working on a fresh checkout
-//! before `nargo compile` has been run.
+//! If the file doesn't exist at build time, the build fails closed. For local
+//! development only, set `TONKL_ALLOW_UNCHECKED_CIRCUIT_HASH=1` to bake the
+//! literal string "unchecked"; runtime will still require the same opt-in
+//! before skipping the hash check.
 
 use std::env;
 use std::fs;
 use std::path::PathBuf;
 
 fn main() {
-    let manifest_dir = env::var("CARGO_MANIFEST_DIR")
-        .expect("CARGO_MANIFEST_DIR always set by cargo");
+    let manifest_dir =
+        env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR always set by cargo");
 
     // Resolve circuit path: env override wins, else default.
     let circuit_path: PathBuf = match env::var("TONKL_CIRCUIT_PATH") {
@@ -43,10 +43,8 @@ fn main() {
     // Tell cargo when to re-run this build script.
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-env-changed=TONKL_CIRCUIT_PATH");
-    println!(
-        "cargo:rerun-if-changed={}",
-        circuit_path.display()
-    );
+    println!("cargo:rerun-if-env-changed=TONKL_ALLOW_UNCHECKED_CIRCUIT_HASH");
+    println!("cargo:rerun-if-changed={}", circuit_path.display());
 
     let hash_hex = match fs::read(&circuit_path) {
         Ok(bytes) => {
@@ -59,10 +57,22 @@ fn main() {
             }
             s
         }
-        Err(_) => {
-            // Emit a build-time warning so the user knows the hash check is disabled.
+        Err(e) => {
+            let allow_unchecked = env::var("TONKL_ALLOW_UNCHECKED_CIRCUIT_HASH")
+                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                .unwrap_or(false);
+            if !allow_unchecked {
+                panic!(
+                    "tonkl-prover: required circuit artifact not found at {} ({e}). \
+Run `cd {}/../tonkl-transfer && nargo compile`, set TONKL_CIRCUIT_PATH to the intended circuit JSON, \
+or set TONKL_ALLOW_UNCHECKED_CIRCUIT_HASH=1 for local development only.",
+                    circuit_path.display(),
+                    manifest_dir,
+                );
+            }
+
             println!(
-                "cargo:warning=tonkl-prover: circuit not found at {} — baking 'unchecked' (runtime hash check disabled)",
+                "cargo:warning=tonkl-prover: circuit not found at {} — baking 'unchecked' because TONKL_ALLOW_UNCHECKED_CIRCUIT_HASH is set",
                 circuit_path.display()
             );
             "unchecked".to_string()

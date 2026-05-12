@@ -14,9 +14,9 @@
 //
 // Both structures survive process restarts via sled's crash-safe storage.
 
-use tonkl_prover::{poseidon2_hash_2, AcirField, FieldElement, fe_to_be_32};
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, RwLock};
+use tonkl_prover::{fe_to_be_32, poseidon2_hash_2, AcirField, FieldElement};
 
 // ─────────────────────────────────────────────────────────────────────
 // Note Commitment Tree
@@ -49,7 +49,10 @@ impl NoteTree {
         // Recover leaf count from DB (0 if fresh)
         let leaf_count = match tree.get("meta:leaf_count")? {
             Some(bytes) => u64::from_le_bytes(
-                bytes.as_ref().try_into().map_err(|_| StateError::CorruptedData("leaf_count".into()))?,
+                bytes
+                    .as_ref()
+                    .try_into()
+                    .map_err(|_| StateError::CorruptedData("leaf_count".into()))?,
             ),
             None => 0,
         };
@@ -82,7 +85,8 @@ impl NoteTree {
 
         // Store the leaf
         let leaf_key = format!("leaf:{}", index);
-        self.db.insert(leaf_key.as_bytes(), &fe_to_be_32(&commitment) as &[u8])?;
+        self.db
+            .insert(leaf_key.as_bytes(), &fe_to_be_32(&commitment) as &[u8])?;
 
         // Update internal nodes bottom-up
         let mut current = commitment;
@@ -104,11 +108,13 @@ impl NoteTree {
                 poseidon2_hash_2(sibling, current)
             } else {
                 poseidon2_hash_2(current, sibling)
-            }.map_err(|e| StateError::CorruptedData(format!("hash error: {}", e)))?;
+            }
+            .map_err(|e| StateError::CorruptedData(format!("hash error: {}", e)))?;
 
             // Store the parent node
             let node_key = format!("node:{}:{}", level + 1, parent_idx);
-            self.db.insert(node_key.as_bytes(), &fe_to_be_32(&parent) as &[u8])?;
+            self.db
+                .insert(node_key.as_bytes(), &fe_to_be_32(&parent) as &[u8])?;
 
             current = parent;
             idx = parent_idx;
@@ -116,7 +122,8 @@ impl NoteTree {
 
         // Update leaf count
         self.leaf_count = index + 1;
-        self.db.insert("meta:leaf_count", &self.leaf_count.to_le_bytes())?;
+        self.db
+            .insert("meta:leaf_count", &self.leaf_count.to_le_bytes())?;
 
         // Flush to ensure durability
         self.db.flush()?;
@@ -186,7 +193,10 @@ impl NoteTree {
                 if self.leaf_count == 0 {
                     Ok(FieldElement::zero())
                 } else {
-                    Err(StateError::CorruptedData(format!("missing node at level={}, index={}", level, index)))
+                    Err(StateError::CorruptedData(format!(
+                        "missing node at level={}, index={}",
+                        level, index
+                    )))
                 }
             }
         }
@@ -224,7 +234,10 @@ impl NullifierSet {
         // Recover count
         let count = match tree.get("meta:count")? {
             Some(bytes) => u64::from_le_bytes(
-                bytes.as_ref().try_into().map_err(|_| StateError::CorruptedData("nf_count".into()))?,
+                bytes
+                    .as_ref()
+                    .try_into()
+                    .map_err(|_| StateError::CorruptedData("nf_count".into()))?,
             ),
             None => 0,
         };
@@ -362,10 +375,7 @@ impl EncryptedNoteStore {
     }
 
     /// Store a batch of encrypted notes, one per leaf index.
-    pub fn store_batch(
-        &mut self,
-        entries: &[(u64, Vec<u8>)],
-    ) -> Result<(), StateError> {
+    pub fn store_batch(&mut self, entries: &[(u64, Vec<u8>)]) -> Result<(), StateError> {
         for (leaf_index, ciphertext) in entries {
             let key = format!("enc:{}", leaf_index);
             self.db.insert(key.as_bytes(), ciphertext.as_slice())?;
@@ -449,12 +459,41 @@ impl ChainMeta {
 
     /// Persist the new block count and last hash after producing a block.
     pub fn update(&self, block_count: u64, last_hash: [u8; 32]) -> Result<(), StateError> {
-        self.db
-            .insert("block_count", &block_count.to_le_bytes())?;
-        self.db
-            .insert("last_block_hash", &last_hash as &[u8])?;
+        self.db.insert("block_count", &block_count.to_le_bytes())?;
+        self.db.insert("last_block_hash", &last_hash as &[u8])?;
         self.db.flush()?;
         Ok(())
+    }
+
+    /// Read cumulative minted supply for an asset.
+    ///
+    /// Asset IDs should be passed in canonical field-hex form.
+    pub fn minted_supply(&self, asset_id: &str) -> Result<u128, StateError> {
+        let key = format!("minted_supply:{}", asset_id);
+        match self.db.get(key.as_bytes())? {
+            Some(bytes) => {
+                let arr: [u8; 16] = bytes
+                    .as_ref()
+                    .try_into()
+                    .map_err(|_| StateError::CorruptedData("minted_supply".into()))?;
+                Ok(u128::from_le_bytes(arr))
+            }
+            None => Ok(0),
+        }
+    }
+
+    /// Add to cumulative minted supply for an asset and return the new total.
+    ///
+    /// Asset IDs should be passed in canonical field-hex form.
+    pub fn add_minted_supply(&self, asset_id: &str, amount: u128) -> Result<u128, StateError> {
+        let current = self.minted_supply(asset_id)?;
+        let next = current
+            .checked_add(amount)
+            .ok_or_else(|| StateError::CorruptedData("minted supply overflow".into()))?;
+        let key = format!("minted_supply:{}", asset_id);
+        self.db.insert(key.as_bytes(), &next.to_le_bytes())?;
+        self.db.flush()?;
+        Ok(next)
     }
 }
 
@@ -585,7 +624,10 @@ mod tests {
 
         let mem_result = build_merkle_tree(&[leaf]).unwrap();
         let disk_root = tree.root().unwrap();
-        assert_eq!(disk_root, mem_result.root, "Disk root must match in-memory root");
+        assert_eq!(
+            disk_root, mem_result.root,
+            "Disk root must match in-memory root"
+        );
     }
 
     #[test]
@@ -601,7 +643,10 @@ mod tests {
 
         let mem_result = build_merkle_tree(&leaves).unwrap();
         let disk_root = tree.root().unwrap();
-        assert_eq!(disk_root, mem_result.root, "8-leaf disk root must match in-memory");
+        assert_eq!(
+            disk_root, mem_result.root,
+            "8-leaf disk root must match in-memory"
+        );
     }
 
     #[test]
@@ -623,11 +668,13 @@ mod tests {
             for level in 0..TREE_DEPTH {
                 assert_eq!(
                     proof.index_bits[level], mem_path.index_bits[level],
-                    "Bit mismatch at leaf={}, level={}", i, level
+                    "Bit mismatch at leaf={}, level={}",
+                    i, level
                 );
                 assert_eq!(
                     proof.siblings[level], mem_path.siblings[level],
-                    "Sibling mismatch at leaf={}, level={}", i, level
+                    "Sibling mismatch at leaf={}, level={}",
+                    i, level
                 );
             }
         }
@@ -736,7 +783,11 @@ mod tests {
             set.insert(FieldElement::from(i as u128)).unwrap();
         }
         for i in 0..1000 {
-            assert!(set.contains_maybe(&FieldElement::from(i as u128)), "False negative at {}", i);
+            assert!(
+                set.contains_maybe(&FieldElement::from(i as u128)),
+                "False negative at {}",
+                i
+            );
         }
     }
 }
