@@ -981,6 +981,7 @@ class NodeWallet:
         exclude_ids: Optional[List[int]] = None,
         sender_sk: Optional[str] = None,
         force_pair: bool = False,
+        node_leaf_count: Optional[int] = None,
     ) -> List[WalletNote]:
         """
         Automatically select unspent notes that cover `amount`.
@@ -996,6 +997,9 @@ class NodeWallet:
             force_pair: If True, skip single-note solutions and always
                         return a pair. Used when no zero-value dummy note
                         is available for single-input padding.
+            node_leaf_count: If set, skip notes whose tree_index is outside
+                        the live node tree. These are stale local notes and
+                        cannot produce a valid witness.
 
         Returns:
             List of 1-2 WalletNote objects whose total value >= amount.
@@ -1004,12 +1008,36 @@ class NodeWallet:
             ValueError: If no combination of 1-2 notes covers the amount.
         """
         exclude = set(exclude_ids or [])
-        candidates = [
+        base_candidates = [
             n for n in self.get_unspent(asset_id=asset_id)
             if n.note_id not in exclude
             and n.tree_index is not None
             and n.value > 0
             and (sender_sk is None or n.owner_sk == sender_sk)
+        ]
+        tree_index_counts: dict[int, int] = {}
+        for n in base_candidates:
+            assert n.tree_index is not None
+            tree_index_counts[n.tree_index] = tree_index_counts.get(n.tree_index, 0) + 1
+        duplicate_tree_indexes = {
+            idx for idx, count in tree_index_counts.items()
+            if count > 1
+        }
+        stale_candidates = [
+            n for n in base_candidates
+            if node_leaf_count is not None and n.tree_index >= node_leaf_count
+        ]
+        duplicate_candidates = [
+            n for n in base_candidates
+            if n.tree_index in duplicate_tree_indexes
+        ]
+        candidates = [
+            n for n in base_candidates
+            if node_leaf_count is None or n.tree_index < node_leaf_count
+        ]
+        candidates = [
+            n for n in candidates
+            if n.tree_index not in duplicate_tree_indexes
         ]
         # Already sorted descending by value from get_unspent()
 
@@ -1031,16 +1059,31 @@ class NodeWallet:
 
         # No valid combination
         total_available = sum(n.value for n in candidates)
+        stale_note_msg = ""
+        if stale_candidates:
+            stale_note_msg = (
+                f" Ignored {len(stale_candidates)} stale note(s) beyond "
+                f"node leaf count {node_leaf_count}. Run sync or recreate "
+                f"the wallet for the current testnet."
+            )
+        duplicate_note_msg = ""
+        if duplicate_candidates:
+            duplicate_note_msg = (
+                f" Ignored {len(duplicate_candidates)} note(s) with duplicate "
+                "tree indexes because they cannot be safely matched to the "
+                "current node tree."
+            )
         raise ValueError(
             f"Cannot cover {amount} with 1-2 notes. "
             f"Available: {total_available} across {len(candidates)} notes. "
-            f"Consider merging notes first."
+            f"Consider merging notes first.{stale_note_msg}{duplicate_note_msg}"
         )
 
     def _find_dummy_note(
         self,
         owner_sk: str,
         asset_id: str = DEFAULT_ASSET_ID,
+        node_leaf_count: Optional[int] = None,
     ) -> Optional[WalletNote]:
         """
         Find a zero-value note owned by `owner_sk` that exists in the tree.
@@ -1051,17 +1094,22 @@ class NodeWallet:
 
         Returns None if no zero-value note is available.
         """
-        rows = self._conn.execute(
+        query = (
             "SELECT * FROM notes WHERE state = 'unspent' AND value = 0 "
             "AND owner_sk = ? AND asset_id = ? AND tree_index IS NOT NULL "
-            "ORDER BY tree_index ASC LIMIT 1",
-            (owner_sk, asset_id),
-        ).fetchall()
+        )
+        params: tuple[object, ...] = (owner_sk, asset_id)
+        if node_leaf_count is not None:
+            query += "AND tree_index < ? "
+            params = (owner_sk, asset_id, node_leaf_count)
+        query += "ORDER BY tree_index ASC LIMIT 1"
+        rows = self._conn.execute(query, params).fetchall()
         return self._row_to_note(rows[0]) if rows else None
 
     def _find_any_dummy_note(
         self,
         asset_id: str = DEFAULT_ASSET_ID,
+        node_leaf_count: Optional[int] = None,
     ) -> Optional[WalletNote]:
         """
         Find a zero-value note owned by ANY key that exists in the tree.
@@ -1070,12 +1118,16 @@ class NodeWallet:
         and no pair can be formed. The transfer circuit allows mixed-owner
         inputs since each input has its own sk/pk/nullifier.
         """
-        rows = self._conn.execute(
+        query = (
             "SELECT * FROM notes WHERE state = 'unspent' AND value = 0 "
             "AND asset_id = ? AND tree_index IS NOT NULL "
-            "ORDER BY tree_index ASC LIMIT 1",
-            (asset_id,),
-        ).fetchall()
+        )
+        params: tuple[object, ...] = (asset_id,)
+        if node_leaf_count is not None:
+            query += "AND tree_index < ? "
+            params = (asset_id, node_leaf_count)
+        query += "ORDER BY tree_index ASC LIMIT 1"
+        rows = self._conn.execute(query, params).fetchall()
         return self._row_to_note(rows[0]) if rows else None
 
     # ── Prover retry logic ───────────────────────────────────────────
@@ -1256,6 +1308,7 @@ class NodeWallet:
         recipient_pk_x: str,
         recipient_pk_y: str,
         recipient_sk: Optional[str] = None,
+        recipient_scan_pk: Optional[str] = None,
         asset_id: str = DEFAULT_ASSET_ID,
         amount: Optional[int] = None,
         sender_sk: Optional[str] = None,
@@ -1273,6 +1326,8 @@ class NodeWallet:
             recipient_pk_x/y: Recipient public key.
             recipient_sk: Optional recipient spending key, used only to derive
                 the scan public key for encrypted note delivery.
+            recipient_scan_pk: Optional recipient scan public key. This is the
+                preferred public receive path for web/API flows.
             asset_id: Which asset to drip ("1" for TNKL, "4" for sUSDC).
             amount: Override drip amount. Uses default if None.
             sender_sk: Faucet spending key. Uses first available if None.
@@ -1326,6 +1381,7 @@ class NodeWallet:
             to_value=amount,
             sender_sk=sender_sk,
             recipient_sk=recipient_sk,
+            recipient_scan_pk=recipient_scan_pk,
             asset_id=asset_id,
         )
 
@@ -2651,7 +2707,7 @@ class NodeWallet:
         }
 
     def _resolve_scan_pk(self, pk_x: str = None, pk_y: str = None,
-                          spending_sk: str = None) -> Optional[str]:
+                         spending_sk: str = None) -> Optional[str]:
         """
         Resolve a scan public key from either a spending key or pk coordinates.
 
@@ -2667,6 +2723,14 @@ class NodeWallet:
                 return None
         return None
 
+    def _normalize_scan_pk_hex(self, scan_pk: str) -> str:
+        clean = scan_pk.strip()
+        if clean.startswith("0x") or clean.startswith("0X"):
+            clean = clean[2:]
+        if len(clean) != 64 or any(ch not in "0123456789abcdefABCDEF" for ch in clean):
+            raise ValueError("Recipient scan public key must be a 32-byte hex value")
+        return "0x" + clean.lower()
+
     # ── Transfer (2-in / 2-out) ───────────────────────────────────────
 
     def send(
@@ -2677,6 +2741,7 @@ class NodeWallet:
         from_note_ids: Optional[List[int]] = None,
         sender_sk: Optional[str] = None,
         recipient_sk: Optional[str] = None,
+        recipient_scan_pk: Optional[str] = None,
         change_sk: Optional[str] = None,
         change_rho: Optional[str] = None,
         out1_rho: Optional[str] = None,
@@ -2697,6 +2762,7 @@ class NodeWallet:
             from_note_ids: Optional list of 1-2 note IDs to spend.
                            If None, notes are auto-selected.
             sender_sk: When auto-selecting, only use notes owned by this key.
+            recipient_scan_pk: Public scan key for encrypted note delivery.
             change_sk: SK for the change output (defaults to first input's sk).
             change_rho: Rho for the change output (auto-generated if None).
             out1_rho: Rho for the recipient output (auto-generated if None).
@@ -2709,6 +2775,13 @@ class NodeWallet:
         # Transfer circuit requires out1_value != 0
         if to_value == 0:
             raise ValueError("Transfer primary output must be non-zero")
+        if recipient_scan_pk:
+            recipient_scan_pk = self._normalize_scan_pk_hex(recipient_scan_pk)
+
+        # Spend proofs require Merkle paths from the live node. Local wallet DBs
+        # can outlive a testnet reset, so ignore notes beyond the node leaf
+        # count before selecting inputs.
+        node_leaf_count = self.client.get_status().leaf_count
 
         # ── Coin selection ────────────────────────────────────────────
         if from_note_ids is not None:
@@ -2722,6 +2795,12 @@ class NodeWallet:
                     raise ValueError(f"Note #{nid} is {note.state}, not unspent")
                 if note.tree_index is None:
                     raise ValueError(f"Note #{nid} has no tree_index — run sync or set it")
+                if note.tree_index >= node_leaf_count:
+                    raise ValueError(
+                        f"Note #{nid} has tree_index {note.tree_index}, but the "
+                        f"node only has {node_leaf_count} leaves. Run sync or "
+                        f"recreate the wallet for the current testnet."
+                    )
                 inputs.append(note)
         else:
             # Auto coin selection
@@ -2730,6 +2809,7 @@ class NodeWallet:
                 amount=to_value + fee,
                 asset_id=asset_id,
                 sender_sk=sender_sk,
+                node_leaf_count=node_leaf_count,
             )
             print(f"  ✓ Selected {len(inputs)} note(s): "
                   + ", ".join(f"#{n.note_id}({n.value})" for n in inputs))
@@ -2766,6 +2846,7 @@ class NodeWallet:
             dummy_note = self._find_dummy_note(
                 owner_sk=inputs[0].owner_sk,
                 asset_id=asset_id,
+                node_leaf_count=node_leaf_count,
             )
             if dummy_note is not None:
                 inputs.append(dummy_note)
@@ -2780,6 +2861,7 @@ class NodeWallet:
                         asset_id=asset_id,
                         sender_sk=sender_sk,
                         force_pair=True,
+                        node_leaf_count=node_leaf_count,
                     )
                     print(f"  ✓ Re-selected {len(inputs)} note(s): "
                           + ", ".join(f"#{n.note_id}({n.value})" for n in inputs))
@@ -2792,7 +2874,10 @@ class NodeWallet:
                     # Strategy 2: No pair available either. Try a dummy from
                     # ANY key — the circuit allows mixed-owner inputs.
                     print("  No pair available, searching for any dummy note...")
-                    any_dummy = self._find_any_dummy_note(asset_id=asset_id)
+                    any_dummy = self._find_any_dummy_note(
+                        asset_id=asset_id,
+                        node_leaf_count=node_leaf_count,
+                    )
                     if any_dummy is not None:
                         inputs.append(any_dummy)
                         print(f"  ✓ Using cross-key dummy #{any_dummy.note_id} "
@@ -2953,7 +3038,7 @@ class NodeWallet:
             # We store for ALL outputs so the recipient can scan.
             enc_entries.append({
                 "leaf_index": recipient_tree_idx,
-                "scan_pk_hex": self._resolve_scan_pk(spending_sk=recipient_sk),
+                "scan_pk_hex": recipient_scan_pk or self._resolve_scan_pk(spending_sk=recipient_sk),
                 "value": to_value,
                 "asset_id": asset_id,
                 "rho": out1_rho,
@@ -4125,6 +4210,7 @@ def main():
     p_send.add_argument("--to-sk-env", help="Read recipient sk from this environment variable")
     p_send.add_argument("--to-pk-x", help="Recipient pk_x (hex)")
     p_send.add_argument("--to-pk-y", help="Recipient pk_y (hex)")
+    p_send.add_argument("--to-scan-pk", help="Recipient public scan key for encrypted note delivery")
     p_send.add_argument("--from", dest="from_ids",
                         help="Comma-separated note IDs to spend (1-2). Auto-selected if omitted.")
     p_send.add_argument("--sk", dest="sender_sk",
@@ -4207,6 +4293,7 @@ def main():
                           help="Recipient local wallet key index (keeps sk inside wallet process)")
     p_faucet.add_argument("--to-pk-x", help="Recipient pk_x (hex)")
     p_faucet.add_argument("--to-pk-y", help="Recipient pk_y (hex)")
+    p_faucet.add_argument("--to-scan-pk", help="Recipient public scan key for encrypted note delivery")
     p_faucet.add_argument("--asset-id", default=DEFAULT_ASSET_ID,
                           help="Asset to drip (1=TNKL, 4=sUSDC). Default: 1")
     p_faucet.add_argument("--amount", type=int, default=None,
@@ -4602,6 +4689,7 @@ def _dispatch(args, wallet: NodeWallet):
             from_note_ids=from_ids,
             sender_sk=sender_sk,
             recipient_sk=to_sk,
+            recipient_scan_pk=args.to_scan_pk,
             asset_id=args.asset_id,
             fee=args.fee,
             auto_block=not args.no_block,
@@ -5011,6 +5099,7 @@ def _dispatch(args, wallet: NodeWallet):
                 recipient_pk_x=pk_x,
                 recipient_pk_y=pk_y,
                 recipient_sk=to_sk,
+                recipient_scan_pk=args.to_scan_pk,
                 asset_id=args.asset_id,
                 amount=args.amount,
                 sender_sk=from_sk,
