@@ -1,24 +1,29 @@
 # ───────────────────────────────────────────────────────────────────
-# Tonkl Node — Multi-stage build
+# Tonkl Node — Docker build
+#
+# Usage:
+#   docker compose up --build
 # ───────────────────────────────────────────────────────────────────
 
-FROM rust:1.78-bookworm AS builder
+FROM rust:1.89-bookworm AS builder
 
 WORKDIR /build
 
-# Copy workspace
+# Copy source
 COPY tonkl-prover/ tonkl-prover/
 COPY tonkl-node/ tonkl-node/
-COPY tonkl-transfer/target/tonkl_transfer.json tonkl-transfer/target/tonkl_transfer.json
 
 # Build release binary
-RUN cd tonkl-node && cargo build --release
+# TONKL_ALLOW_UNCHECKED_CIRCUIT_HASH: the node verifies proofs via VK files,
+# it does not generate proofs, so the circuit hash bake-in is not needed.
+ENV TONKL_ALLOW_UNCHECKED_CIRCUIT_HASH=1
+RUN cd tonkl-node && cargo build --release --locked
 
 # ─── Runtime stage ────────────────────────────────────────────────
 FROM debian:bookworm-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates python3 python3-pip curl \
+    ca-certificates curl \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /tonkl
@@ -26,19 +31,13 @@ WORKDIR /tonkl
 # Copy node binary
 COPY --from=builder /build/tonkl-node/target/release/tonkl-node /usr/local/bin/tonkl-node
 
-# Copy Python scripts
-COPY tonkl-node/scripts/ scripts/
+# Copy verification keys
+COPY vks/ /tonkl/vks/
 
-# Copy circuit artifacts (VKs) if available
-COPY tonkl-transfer/target/ circuits/transfer/
-COPY tonkl-split/target/ circuits/split/
-COPY tonkl-merge/target/ circuits/merge/
-COPY tonkl-mint/target/ circuits/mint/
-
-# Default data directory
 RUN mkdir -p /tonkl/data
 
-EXPOSE 9100 9150
+EXPOSE 9100
 
 ENTRYPOINT ["tonkl-node"]
-CMD ["run", "--bind", "0.0.0.0", "--port", "9100", "--data-dir", "/tonkl/data"]
+CMD ["run", "--bind", "0.0.0.0", "--port", "9100", "--data-dir", "/tonkl/data", \
+     "--vk-dir", "/tonkl/vks"]

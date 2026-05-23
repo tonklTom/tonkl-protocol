@@ -4,14 +4,19 @@
 # Usage:
 #   docker compose up              Start a 3-node testnet
 #   docker compose up node-0       Single-node quickstart
-#   docker compose up --scale ...  Custom node count
 #   docker compose down -v         Tear down + remove volumes
 #
 # Each node exposes its RPC port:
 #   node-0: http://localhost:9100
 #   node-1: http://localhost:9101
 #   node-2: http://localhost:9102
+#
+# RPC writes require TONKL_RPC_SECRET. This compose file binds ports to
+# localhost for local/private-alpha testing by default.
 # ───────────────────────────────────────────────────────────────────
+
+x-rpc-secret: &rpc-secret
+  TONKL_RPC_SECRET: ${TONKL_RPC_SECRET:?Set TONKL_RPC_SECRET before starting the testnet}
 
 services:
   # ─── Primary node ───────────────────────────────────────────────
@@ -21,12 +26,21 @@ services:
       dockerfile: docker/Dockerfile.node
     container_name: tonkl-node-0
     ports:
-      - "9100:9100"
+      - "127.0.0.1:9100:9100"
     volumes:
       - node0-data:/tonkl/data
     environment:
-      - RUST_LOG=info
-    command: ["run", "--bind", "0.0.0.0", "--port", "9100", "--data-dir", "/tonkl/data"]
+      RUST_LOG: info
+      <<: *rpc-secret
+    command:
+      - run
+      - --bind=0.0.0.0
+      - --port=9100
+      - --data-dir=/tonkl/data
+      - --vk-dir=/tonkl/vks
+      - --node-id=node-0
+      - --validators=node-0,node-1,node-2
+      - --block-interval=5
     healthcheck:
       test: ["CMD", "curl", "-sf", "-X", "POST", "-H", "Content-Type: application/json",
              "-d", '{"jsonrpc":"2.0","method":"get_status","params":[],"id":1}',
@@ -45,12 +59,22 @@ services:
       dockerfile: docker/Dockerfile.node
     container_name: tonkl-node-1
     ports:
-      - "9101:9100"
+      - "127.0.0.1:9101:9100"
     volumes:
       - node1-data:/tonkl/data
     environment:
-      - RUST_LOG=info
-    command: ["run", "--bind", "0.0.0.0", "--port", "9100", "--data-dir", "/tonkl/data"]
+      RUST_LOG: info
+      <<: *rpc-secret
+    command:
+      - run
+      - --bind=0.0.0.0
+      - --port=9100
+      - --data-dir=/tonkl/data
+      - --vk-dir=/tonkl/vks
+      - --node-id=node-1
+      - --validators=node-0,node-1,node-2
+      - --block-interval=5
+      - --sync-from=http://tonkl-node-0:9100
     depends_on:
       node-0:
         condition: service_healthy
@@ -64,12 +88,22 @@ services:
       dockerfile: docker/Dockerfile.node
     container_name: tonkl-node-2
     ports:
-      - "9102:9100"
+      - "127.0.0.1:9102:9100"
     volumes:
       - node2-data:/tonkl/data
     environment:
-      - RUST_LOG=info
-    command: ["run", "--bind", "0.0.0.0", "--port", "9100", "--data-dir", "/tonkl/data"]
+      RUST_LOG: info
+      <<: *rpc-secret
+    command:
+      - run
+      - --bind=0.0.0.0
+      - --port=9100
+      - --data-dir=/tonkl/data
+      - --vk-dir=/tonkl/vks
+      - --node-id=node-2
+      - --validators=node-0,node-1,node-2
+      - --block-interval=5
+      - --sync-from=http://tonkl-node-0:9100
     depends_on:
       node-0:
         condition: service_healthy

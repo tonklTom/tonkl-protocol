@@ -18,17 +18,17 @@ description = "In-process Noir witness solver for Tonkl Protocol. Reads circuit 
 
 [dependencies]
 # ACVM: the Noir virtual machine for witness solving
-acvm = { git = "https://github.com/noir-lang/noir.git", tag = "v1.0.0-beta.20" }
+acvm = { git = "https://github.com/noir-lang/noir.git", rev = "b4236c1957d0c26cb65d82adc9e5447b6ff1d629" }
 
 # ABI: parse compiled circuit ABI, convert inputs to WitnessMap
-noirc_abi = { git = "https://github.com/noir-lang/noir.git", tag = "v1.0.0-beta.20" }
+noirc_abi = { git = "https://github.com/noir-lang/noir.git", rev = "b4236c1957d0c26cb65d82adc9e5447b6ff1d629" }
 
 # BN254 blackbox solver: Poseidon2, Grumpkin EC, Schnorr, etc.
-bn254_blackbox_solver = { git = "https://github.com/noir-lang/noir.git", tag = "v1.0.0-beta.20" }
+bn254_blackbox_solver = { git = "https://github.com/noir-lang/noir.git", rev = "b4236c1957d0c26cb65d82adc9e5447b6ff1d629" }
 
 # Blackbox solver trait: needed to call poseidon2_permutation, multi_scalar_mul
 # directly for wallet-side hash computation (commitment, nullifier, derive_pk).
-acvm_blackbox_solver = { git = "https://github.com/noir-lang/noir.git", tag = "v1.0.0-beta.20" }
+acvm_blackbox_solver = { git = "https://github.com/noir-lang/noir.git", rev = "b4236c1957d0c26cb65d82adc9e5447b6ff1d629" }
 
 # JSON input from stdin
 serde = { version = "1", features = ["derive"] }

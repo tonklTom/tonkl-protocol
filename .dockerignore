@@ -1,4 +1,5 @@
-# Tonkl Docker build — exclude non-essential files
+# Tonkl Docker build context
+# Includes: tonkl-prover/, tonkl-node/, docker/, vks/
 .git/
 *.md
 *.docx
@@ -8,15 +9,19 @@ tonkl-website/
 tonkl-hasher/
 tonkl-tree/
 tonkl-lib/
+tonkl-transfer/
+tonkl-split/
+tonkl-merge/
+tonkl-mint/
+tonkl/
+scripts/
 node_modules/
 .env
 .env.*
 docker-compose.yml
+docker/vendor/
+docker/cargo-config.toml
 
-# Exclude Rust build artifacts (the builder stage compiles from source)
-# but keep circuit target/ dirs for VK files used by the runtime stage
-**/target/release/
-**/target/debug/
-**/target/.rustc_info.json
-**/target/.cargo-lock
-**/target/CACHEDIR.TAG
+# Exclude local build artifacts (Docker builds from source)
+tonkl-node/target/
+tonkl-prover/target/

@@ -2,8 +2,9 @@
 target/
 **/*.rs.bk
 Cargo.lock
-# Keep Cargo.lock in workspace subcrates that are binaries (tonkl-node)
+# Keep Cargo.lock for binary crates (reproducible builds, Docker)
 !tonkl-node/Cargo.lock
+!tonkl-prover/Cargo.lock
 
 # ─── Noir (ZK circuits) ─────────────────────────────
 **/target/
@@ -46,6 +47,8 @@ Thumbs.db
 # ─── Docker runtime ─────────────────────────────────
 docker/data/
 docker/logs/
+docker/vendor/
+docker/cargo-config.toml
 
 # ─── Python ──────────────────────────────────────────
 __pycache__/
@@ -58,4 +61,5 @@ venv/
 *.so
 *.dylib
 *.dll
+tonkl-node/tonkl-data/
 tonkl-node/obscura-data/
