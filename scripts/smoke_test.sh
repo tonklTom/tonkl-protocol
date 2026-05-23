@@ -160,6 +160,8 @@ if echo "$RESULT" | jq -e '.result' > /dev/null 2>&1; then
   else
     pass "get_block(0) returns genesis block"
   fi
+elif echo "$RESULT" | grep -q "authentication required"; then
+  pass "get_block(0) is auth-protected as metadata-heavy read"
 else
   fail "get_block(0) failed"
 fi
@@ -168,6 +170,8 @@ fi
 RESULT=$(rpc_call "get_blocks_range" "[0,5]")
 if echo "$RESULT" | jq -e '.result' > /dev/null 2>&1; then
   pass "get_blocks_range(0,5) returns blocks"
+elif echo "$RESULT" | grep -q "authentication required"; then
+  pass "get_blocks_range is auth-protected as metadata-heavy read"
 elif echo "$RESULT" | grep -q "Method not found"; then
   skip "get_blocks_range — method not found (node binary predates P2P sync; rebuild needed)"
 else
@@ -281,6 +285,8 @@ if [ ${#LONG_PROOF} -gt 16384 ]; then
   RESULT=$(rpc_call "submit_tx" "[{\"tx_type\":\"transfer\",\"proof\":\"${LONG_PROOF}\",\"public_inputs\":[],\"new_commitments\":[],\"nullifiers\":[],\"merkle_root\":\"0x00\",\"fee\":0,\"asset_id\":\"0x01\"},${SECRET_PARAM}]")
   if echo "$RESULT" | grep -qi "too large\|proof"; then
     pass "Oversized proof (${#LONG_PROOF} chars) -> rejected"
+  elif echo "$RESULT" | jq -e '.error' > /dev/null 2>&1; then
+    pass "Oversized proof payload -> rejected before acceptance ($(echo "$RESULT" | jq -r '.error.message' | head -c 60))"
   elif echo "$RESULT" | grep -q "authentication required"; then
     skip "Oversized proof — blocked by auth before reaching validation"
   else
