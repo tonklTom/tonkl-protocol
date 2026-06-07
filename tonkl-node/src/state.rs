@@ -495,6 +495,28 @@ impl ChainMeta {
         self.db.flush()?;
         Ok(next)
     }
+
+    /// Record a Merkle root as a valid historical anchor.
+    ///
+    /// SECURITY: Input-consuming transactions (transfer/merge/split) prove note
+    /// membership against a `merkle_root` public input. The node MUST only accept
+    /// proofs anchored to a root the chain has actually committed; otherwise an
+    /// attacker can prove membership against a self-constructed tree containing
+    /// fabricated high-value notes and counterfeit tokens. Every committed root
+    /// (genesis + every produced/applied block) is recorded here so it can be
+    /// checked at admission and block-application time.
+    pub fn record_anchor(&self, root: &FieldElement) -> Result<(), StateError> {
+        let key = format!("anchor:{}", field_to_hex(*root));
+        self.db.insert(key.as_bytes(), &[1u8])?;
+        self.db.flush()?;
+        Ok(())
+    }
+
+    /// Returns true if `root` is a known historical anchor committed by the chain.
+    pub fn is_known_anchor(&self, root: &FieldElement) -> Result<bool, StateError> {
+        let key = format!("anchor:{}", field_to_hex(*root));
+        Ok(self.db.get(key.as_bytes())?.is_some())
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────

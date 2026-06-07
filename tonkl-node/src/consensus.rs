@@ -11,6 +11,7 @@
 // This is intentionally minimal — a future phase will add stake-weighted
 // selection, slashing conditions, and BFT finality.
 
+use crate::block::ensure_known_anchors;
 use crate::rpc::NodeState;
 use crate::state::field_to_hex;
 use std::sync::Arc;
@@ -190,6 +191,14 @@ async fn produce_block_if_leader(state: &Arc<RwLock<NodeState>>, config: &Consen
         return;
     }
 
+    // SECURITY (anti-counterfeiting): defense-in-depth anchor check. Mempool
+    // admission already rejects unknown anchors, but re-check here so the leader
+    // never commits an input-consuming tx proven against a forged Merkle root.
+    if let Err(e) = ensure_known_anchors(&s.chain_meta, &txs) {
+        warn!("Block #{} rejected: unknown anchor: {}", next_block, e);
+        return;
+    }
+
     // Apply transactions to state
     for tx in &txs {
         for cm in &tx.new_commitments {
@@ -207,7 +216,13 @@ async fn produce_block_if_leader(state: &Arc<RwLock<NodeState>>, config: &Consen
     }
 
     let root = match s.note_tree.root() {
-        Ok(r) => field_to_hex(r),
+        Ok(r) => {
+            // Record the new root as a valid anchor for future transactions.
+            if let Err(e) = s.chain_meta.record_anchor(&r) {
+                warn!("Failed to record anchor for block #{}: {}", next_block, e);
+            }
+            field_to_hex(r)
+        }
         Err(e) => {
             warn!("Failed to get state root: {}", e);
             return;

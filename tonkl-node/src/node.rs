@@ -10,7 +10,7 @@
 // The event handler runs as a tokio task, processing NetworkEvents
 // from the P2P layer and issuing NetworkCommands back.
 
-use crate::block::{validate_and_apply_block, Block, BlockBuilder, Transaction};
+use crate::block::{ensure_known_anchors, validate_and_apply_block, Block, BlockBuilder, Transaction};
 use crate::p2p::{NetworkCommand, NetworkEvent};
 use crate::rpc::{ConfirmedTx, NodeState};
 
@@ -146,6 +146,15 @@ pub async fn sync_from_peer(state: &Arc<RwLock<NodeState>>, peer_url: &str) -> R
                 ));
             }
 
+            // SECURITY (anti-counterfeiting): every input-consuming tx must be
+            // anchored to a Merkle root this chain actually committed.
+            if let Err(e) = ensure_known_anchors(&s.chain_meta, &block.transactions) {
+                return Err(format!(
+                    "Block #{} rejected: unknown anchor during sync: {}",
+                    block_num, e
+                ));
+            }
+
             // Destructure to allow split borrows (Rust can't split through DerefMut)
             let state_ref = &mut *s;
             match validate_and_apply_block(
@@ -159,6 +168,16 @@ pub async fn sync_from_peer(state: &Arc<RwLock<NodeState>>, peer_url: &str) -> R
                 Ok(()) => {
                     let block_hash = block.hash();
                     s.block_builder = BlockBuilder::from_state(block_num + 1, block_hash);
+
+                    // Record the post-apply Merkle root as a valid anchor.
+                    match s.note_tree.root() {
+                        Ok(root) => {
+                            if let Err(e) = s.chain_meta.record_anchor(&root) {
+                                warn!("Failed to record anchor during sync: {}", e);
+                            }
+                        }
+                        Err(e) => warn!("Failed to read root for anchor during sync: {}", e),
+                    }
 
                     // Index confirmed transactions
                     for tx in &block.transactions {
@@ -365,6 +384,13 @@ async fn handle_received_block(state: &Arc<RwLock<NodeState>>, block: Block) {
         return;
     }
 
+    // SECURITY (anti-counterfeiting): reject blocks containing input-consuming
+    // transactions anchored to a Merkle root this chain never committed.
+    if let Err(e) = ensure_known_anchors(&s.chain_meta, &block.transactions) {
+        warn!("Rejected block #{}: unknown anchor: {}", block_num, e);
+        return;
+    }
+
     let state_ref = &mut *s;
     match validate_and_apply_block(
         &block,
@@ -378,6 +404,16 @@ async fn handle_received_block(state: &Arc<RwLock<NodeState>>, block: Block) {
             // Update block builder state
             let block_hash = block.hash();
             s.block_builder = crate::block::BlockBuilder::from_state(block_num + 1, block_hash);
+
+            // Record the post-apply Merkle root as a valid anchor.
+            match s.note_tree.root() {
+                Ok(root) => {
+                    if let Err(e) = s.chain_meta.record_anchor(&root) {
+                        warn!("Failed to record anchor for block #{}: {}", block_num, e);
+                    }
+                }
+                Err(e) => warn!("Failed to read root for anchor (block #{}): {}", block_num, e),
+            }
 
             // Index confirmed transactions
             for tx in &block.transactions {

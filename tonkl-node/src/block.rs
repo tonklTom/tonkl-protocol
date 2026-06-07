@@ -17,7 +17,7 @@
 //   - New commitments to insert into the note tree
 //   - Nullifiers to insert into the nullifier set (except mint)
 
-use crate::state::{field_to_hex, NoteTree, NullifierSet, StateError};
+use crate::state::{field_to_hex, ChainMeta, NoteTree, NullifierSet, StateError};
 use crate::verifier::{serialize_public_inputs, ProofVerifier};
 use serde::{Deserialize, Serialize};
 use tonkl_prover::{fe_to_be_32, AcirField, FieldElement};
@@ -372,6 +372,39 @@ pub fn validate_transaction_public_inputs(tx: &Transaction) -> Result<(), String
         tx.fee,
         tx.asset_id,
     )
+}
+
+/// Returns true if a transaction consumes input notes (and therefore must be
+/// anchored to a known Merkle root). Mint creates notes from authority and has
+/// no Merkle membership to prove, so it is exempt.
+pub fn tx_requires_anchor(tx_type: TxType) -> bool {
+    !matches!(tx_type, TxType::Mint)
+}
+
+/// SECURITY (anti-counterfeiting): ensure every input-consuming transaction is
+/// anchored to a Merkle root the chain has actually committed. A proof anchored
+/// to an attacker-constructed tree is cryptographically valid but lets the
+/// attacker spend notes that never existed — so the anchor must be a known
+/// historical root. Mint is exempt (no inputs).
+pub fn ensure_known_anchors(
+    chain_meta: &ChainMeta,
+    txs: &[Transaction],
+) -> Result<(), ValidationError> {
+    for tx in txs {
+        if !tx_requires_anchor(tx.tx_type) {
+            continue;
+        }
+        let known = chain_meta
+            .is_known_anchor(&tx.merkle_root)
+            .map_err(ValidationError::State)?;
+        if !known {
+            return Err(ValidationError::StaleTransaction {
+                tx_root: field_to_hex(tx.merkle_root),
+                current_root: "not a known anchor".to_string(),
+            });
+        }
+    }
+    Ok(())
 }
 
 fn expected_tx_hash(tx: &Transaction) -> [u8; 32] {
@@ -819,5 +852,47 @@ mod tests {
             Err(ValidationError::ProofVerificationFailed(_))
         ));
         assert_eq!(note_tree.leaf_count(), 0);
+    }
+
+    // ── Anchor (anti-counterfeiting) tests ──────────────────────────────
+
+    #[test]
+    fn test_ensure_known_anchors_rejects_unknown_root() {
+        let db = temp_db();
+        let chain_meta = crate::state::ChainMeta::open(&db).unwrap();
+
+        // A transfer proven against a root the chain never committed must be
+        // rejected — this is the anti-counterfeiting (forged-anchor) defense.
+        let tx = valid_transfer_tx(); // merkle_root = zero, unrecorded
+        let txs = vec![tx];
+        assert!(matches!(
+            ensure_known_anchors(&chain_meta, &txs),
+            Err(ValidationError::StaleTransaction { .. })
+        ));
+
+        // Once the root is a recorded anchor, the same tx is accepted.
+        chain_meta.record_anchor(&FieldElement::zero()).unwrap();
+        assert!(ensure_known_anchors(&chain_meta, &txs).is_ok());
+    }
+
+    #[test]
+    fn test_mint_is_exempt_from_anchor_check() {
+        let db = temp_db();
+        let chain_meta = crate::state::ChainMeta::open(&db).unwrap();
+
+        // Mint consumes no input notes, so it has no Merkle membership to prove
+        // and must not be subjected to the anchor check.
+        let tx = Transaction {
+            tx_type: TxType::Mint,
+            tx_hash: [0u8; 32],
+            proof: vec![],
+            public_inputs: vec![],
+            new_commitments: vec![FieldElement::from(1u128)],
+            nullifiers: vec![],
+            merkle_root: FieldElement::from(999u128), // arbitrary, unrecorded
+            fee: 0,
+            asset_id: FieldElement::from(1u128),
+        };
+        assert!(ensure_known_anchors(&chain_meta, &[tx]).is_ok());
     }
 }

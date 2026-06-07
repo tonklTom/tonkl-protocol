@@ -468,6 +468,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 mint_policy: MintPolicy::from_env(),
             }));
 
+            // ── Seed the current Merkle root as a valid anchor ──
+            // SECURITY (anti-counterfeiting): input-consuming transactions are only
+            // accepted if anchored to a root the chain committed. Seed the live
+            // root (post-genesis / post-restore) so valid transfers are accepted
+            // immediately after startup.
+            {
+                let s = state.read().await;
+                match s.note_tree.root() {
+                    Ok(root) => {
+                        if let Err(e) = s.chain_meta.record_anchor(&root) {
+                            warn!("Failed to seed startup anchor: {}", e);
+                        }
+                    }
+                    Err(e) => warn!("Failed to read root to seed startup anchor: {}", e),
+                }
+            }
+
             // ── Chain sync (fetch blocks from a running peer) ──
             if let Some(ref peer_url) = sync_from {
                 info!("Syncing chain from peer: {}", peer_url);
@@ -703,6 +720,19 @@ async fn run_block_producer_with_broadcast(
                     continue;
                 }
 
+                // SECURITY: re-validate mint authority/supply and Merkle anchors
+                // before committing, mirroring the external block-apply path.
+                // Mempool admission already enforces these, but the leader must
+                // never commit a block that violates them.
+                if let Err(e) = s.mint_policy.validate_block_mints(&s.chain_meta, &txs) {
+                    warn!("Block #{} rejected by mint policy: {}", next_block, e);
+                    continue;
+                }
+                if let Err(e) = tonkl_node::block::ensure_known_anchors(&s.chain_meta, &txs) {
+                    warn!("Block #{} rejected: unknown anchor: {}", next_block, e);
+                    continue;
+                }
+
                 // Apply transactions to state
                 for tx in &txs {
                     for cm in &tx.new_commitments {
@@ -720,7 +750,13 @@ async fn run_block_producer_with_broadcast(
                 }
 
                 let root = match s.note_tree.root() {
-                    Ok(r) => tonkl_node::state::field_to_hex(r),
+                    Ok(r) => {
+                        // Record the new root as a valid anchor for future txs.
+                        if let Err(e) = s.chain_meta.record_anchor(&r) {
+                            warn!("Failed to record anchor for block #{}: {}", next_block, e);
+                        }
+                        tonkl_node::state::field_to_hex(r)
+                    }
                     Err(e) => {
                         warn!("Failed to get state root: {}", e);
                         continue;
@@ -744,6 +780,18 @@ async fn run_block_producer_with_broadcast(
                             block_number: header.block_number,
                             tx_type: tx.tx_type,
                         },
+                    );
+                }
+
+                // SECURITY: persist minted supply so per-asset supply caps
+                // accumulate across blocks produced on this path.
+                if let Err(e) = s
+                    .mint_policy
+                    .record_block_mints(&s.chain_meta, &block.transactions)
+                {
+                    warn!(
+                        "Failed to persist mint supply for block #{}: {}",
+                        header.block_number, e
                     );
                 }
 

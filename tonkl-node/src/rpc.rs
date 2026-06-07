@@ -1,7 +1,8 @@
 // Tonkl Protocol - JSON-RPC Interface
 
 use crate::block::{
-    validate_public_inputs_match_fields, Block, BlockBuilder, BlockHeader, Transaction, TxType,
+    tx_requires_anchor, validate_public_inputs_match_fields, Block, BlockBuilder, BlockHeader,
+    Transaction, TxType,
 };
 use crate::mempool::Mempool;
 use crate::state::{field_to_hex, ChainMeta, EncryptedNoteStore, NoteTree, NullifierSet};
@@ -19,6 +20,18 @@ use tokio::sync::{mpsc, RwLock};
 use tonkl_prover::{fe_to_be_32, AcirField, FieldElement};
 use tower_http::cors::{AllowOrigin, CorsLayer};
 use tracing::info;
+
+/// Whether the node may accept transactions without proof verification when no
+/// verification keys are loaded. Defaults to false (fail closed); only an
+/// explicit `TONKL_ALLOW_UNVERIFIED_TX` override enables the insecure dev path.
+fn allow_unverified_tx() -> bool {
+    std::env::var("TONKL_ALLOW_UNVERIFIED_TX")
+        .map(|v| {
+            let v = v.trim().to_ascii_lowercase();
+            v == "1" || v == "true" || v == "yes"
+        })
+        .unwrap_or(false)
+}
 
 // ─────────────────────────────────────────────────────────────────────
 // RPC Types
@@ -969,6 +982,23 @@ impl TonklRpcServer for RpcServer {
                 .validate_transaction(&state.chain_meta, &state.mempool, &tx)
                 .map_err(invalid_params)?;
 
+            // SECURITY (anti-counterfeiting): input-consuming transactions must be
+            // anchored to a Merkle root the chain has actually committed. A proof
+            // anchored to an attacker-constructed tree is cryptographically valid
+            // but would let the attacker spend notes that never existed.
+            if tx_requires_anchor(tx.tx_type) {
+                let known = state
+                    .chain_meta
+                    .is_known_anchor(&tx.merkle_root)
+                    .map_err(internal_error)?;
+                if !known {
+                    return Err(invalid_params(format!(
+                        "merkle_root {} is not a known anchor (stale or forged)",
+                        field_to_hex(tx.merkle_root)
+                    )));
+                }
+            }
+
             if state.verifier.is_enabled() {
                 let public_inputs_bytes = serialize_public_inputs(&tx.public_inputs)
                     .map_err(|e| invalid_params(format!("invalid public inputs: {}", e)))?;
@@ -979,6 +1009,19 @@ impl TonklRpcServer for RpcServer {
                     .map_err(|e| invalid_params(format!("proof verification failed: {}", e)))?;
 
                 info!("Proof verified for tx {}", tx_hash_hex);
+            } else if allow_unverified_tx() {
+                // SECURITY: fail-OPEN path, gated behind an explicit dev override.
+                tracing::warn!(
+                    "Verifier disabled — accepting tx {} WITHOUT proof verification (TONKL_ALLOW_UNVERIFIED_TX override)",
+                    tx_hash_hex
+                );
+            } else {
+                // SECURITY (fail closed): refuse writes when no verification keys
+                // are loaded, so a misconfigured node cannot accept unverified
+                // (potentially forged) transactions.
+                return Err(invalid_params(
+                    "proof verification is unavailable on this node (no verification keys loaded); refusing transaction. Set TONKL_ALLOW_UNVERIFIED_TX=1 only for isolated local development.",
+                ));
             }
         }
 
@@ -1112,6 +1155,10 @@ impl TonklRpcServer for RpcServer {
         let txs = state.mempool.drain_for_block(256);
         if txs.is_empty() {
             let root = state.note_tree.root().map_err(|e| internal_error(e))?;
+            // Record the (unchanged) root as a valid anchor.
+            if let Err(e) = state.chain_meta.record_anchor(&root) {
+                tracing::warn!("Failed to record anchor for empty block: {}", e);
+            }
             let state_root = field_to_hex(root);
             let block = state.block_builder.build_block(vec![], state_root);
             let header = block.header.clone();
@@ -1146,6 +1193,11 @@ impl TonklRpcServer for RpcServer {
         }
 
         let root = state.note_tree.root().map_err(|e| internal_error(e))?;
+        // SECURITY (anti-counterfeiting): record the new root as a valid anchor so
+        // future transactions can prove membership against it.
+        if let Err(e) = state.chain_meta.record_anchor(&root) {
+            tracing::warn!("Failed to record anchor for block: {}", e);
+        }
         let state_root = field_to_hex(root);
 
         let block = state.block_builder.build_block(txs, state_root);
