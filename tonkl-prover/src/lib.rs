@@ -58,14 +58,16 @@ fn p2(state: [FieldElement; 4]) -> Result<[FieldElement; 4]> {
 /// 2-input Poseidon2 hash. Used for Merkle tree node hashing.
 /// Matches `hash_2(a, b)` in hash.nr.
 pub fn poseidon2_hash_2(a: FieldElement, b: FieldElement) -> Result<FieldElement> {
-    let state = p2([a, b, FieldElement::zero(), FieldElement::zero()])?;
+    // capacity IV = 2 (arity tag) — must match hash_2 in hash.nr
+    let state = p2([a, b, FieldElement::zero(), FieldElement::from(2u128)])?;
     Ok(state[0])
 }
 
 /// 3-input Poseidon2 hash. Used for nullifier: hash(DOMAIN, cm, sk).
 /// Matches `hash_3(a, b, c)` in hash.nr.
 pub fn poseidon2_hash_3(a: FieldElement, b: FieldElement, c: FieldElement) -> Result<FieldElement> {
-    let state = p2([a, b, c, FieldElement::zero()])?;
+    // capacity IV = 3 (arity tag) — must match hash_3 in hash.nr
+    let state = p2([a, b, c, FieldElement::from(3u128)])?;
     Ok(state[0])
 }
 
@@ -80,8 +82,8 @@ pub fn poseidon2_hash_7(
     f: FieldElement,
     g: FieldElement,
 ) -> Result<FieldElement> {
-    // Phase 1: absorb first 3 inputs
-    let s1 = p2([a, b, c, FieldElement::zero()])?;
+    // Phase 1: absorb first 3 inputs (capacity IV = 7 arity tag, preserved across all 3 permutations)
+    let s1 = p2([a, b, c, FieldElement::from(7u128)])?;
     // Phase 2: XOR (field add) next 3 inputs into rate
     let s2 = p2([s1[0] + d, s1[1] + e, s1[2] + f, s1[3]])?;
     // Phase 3: XOR final input into state[0]

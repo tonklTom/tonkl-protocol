@@ -10,7 +10,7 @@
 // The event handler runs as a tokio task, processing NetworkEvents
 // from the P2P layer and issuing NetworkCommands back.
 
-use crate::block::{ensure_known_anchors, validate_and_apply_block, Block, BlockBuilder, Transaction};
+use crate::block::{validate_and_apply_block, Block, BlockBuilder, Transaction};
 use crate::p2p::{NetworkCommand, NetworkEvent};
 use crate::rpc::{ConfirmedTx, NodeState};
 
@@ -136,32 +136,18 @@ pub async fn sync_from_peer(state: &Arc<RwLock<NodeState>>, peer_url: &str) -> R
                 ));
             }
 
-            if let Err(e) = s
-                .mint_policy
-                .validate_block_mints(&s.chain_meta, &block.transactions)
-            {
-                return Err(format!(
-                    "Block #{} rejected by mint policy during sync: {}",
-                    block_num, e
-                ));
-            }
-
-            // SECURITY (anti-counterfeiting): every input-consuming tx must be
-            // anchored to a Merkle root this chain actually committed.
-            if let Err(e) = ensure_known_anchors(&s.chain_meta, &block.transactions) {
-                return Err(format!(
-                    "Block #{} rejected: unknown anchor during sync: {}",
-                    block_num, e
-                ));
-            }
-
-            // Destructure to allow split borrows (Rust can't split through DerefMut)
+            // Destructure to allow split borrows (Rust can't split through DerefMut).
+            // Anchor validity + mint authority/supply are enforced INSIDE
+            // validate_and_apply_block (the consensus gate), so this path cannot
+            // skip them.
             let state_ref = &mut *s;
             match validate_and_apply_block(
                 &block,
                 &state_ref.verifier,
                 &mut state_ref.note_tree,
                 &mut state_ref.nullifier_set,
+                &state_ref.chain_meta,
+                &state_ref.mint_policy,
                 expected_block_number,
                 expected_parent_hash,
             ) {
@@ -376,27 +362,16 @@ async fn handle_received_block(state: &Arc<RwLock<NodeState>>, block: Block) {
 
     // Validate and apply the block
     // Destructure to allow split borrows (Rust can't split through DerefMut)
-    if let Err(e) = s
-        .mint_policy
-        .validate_block_mints(&s.chain_meta, &block.transactions)
-    {
-        warn!("Rejected block #{} by mint policy: {}", block_num, e);
-        return;
-    }
-
-    // SECURITY (anti-counterfeiting): reject blocks containing input-consuming
-    // transactions anchored to a Merkle root this chain never committed.
-    if let Err(e) = ensure_known_anchors(&s.chain_meta, &block.transactions) {
-        warn!("Rejected block #{}: unknown anchor: {}", block_num, e);
-        return;
-    }
-
+    // Anchor validity + mint authority/supply are enforced INSIDE
+    // validate_and_apply_block (the consensus gate); this path cannot skip them.
     let state_ref = &mut *s;
     match validate_and_apply_block(
         &block,
         &state_ref.verifier,
         &mut state_ref.note_tree,
         &mut state_ref.nullifier_set,
+        &state_ref.chain_meta,
+        &state_ref.mint_policy,
         expected_block_number,
         expected_parent_hash,
     ) {

@@ -11,7 +11,7 @@
 // This is intentionally minimal — a future phase will add stake-weighted
 // selection, slashing conditions, and BFT finality.
 
-use crate::block::ensure_known_anchors;
+use crate::block::enforce_consensus_rules;
 use crate::rpc::NodeState;
 use crate::state::field_to_hex;
 use std::sync::Arc;
@@ -186,16 +186,11 @@ async fn produce_block_if_leader(state: &Arc<RwLock<NodeState>>, config: &Consen
         return;
     }
 
-    if let Err(e) = s.mint_policy.validate_block_mints(&s.chain_meta, &txs) {
-        warn!("Mint policy rejected block #{}: {}", next_block, e);
-        return;
-    }
-
-    // SECURITY (anti-counterfeiting): defense-in-depth anchor check. Mempool
-    // admission already rejects unknown anchors, but re-check here so the leader
-    // never commits an input-consuming tx proven against a forged Merkle root.
-    if let Err(e) = ensure_known_anchors(&s.chain_meta, &txs) {
-        warn!("Block #{} rejected: unknown anchor: {}", next_block, e);
+    // SECURITY (consensus gate): anchor validity + mint authority/supply — the
+    // same invariants validate_and_apply_block enforces for ingested blocks, so
+    // the leader can never commit a block that violates them.
+    if let Err(e) = enforce_consensus_rules(&s.chain_meta, &s.mint_policy, &txs) {
+        warn!("Block #{} rejected by consensus gate: {}", next_block, e);
         return;
     }
 

@@ -1,8 +1,8 @@
 // Tonkl Protocol - JSON-RPC Interface
 
 use crate::block::{
-    tx_requires_anchor, validate_public_inputs_match_fields, Block, BlockBuilder, BlockHeader,
-    Transaction, TxType,
+    enforce_consensus_rules, tx_requires_anchor, validate_public_inputs_match_fields, Block,
+    BlockBuilder, BlockHeader, Transaction, TxType,
 };
 use crate::mempool::Mempool;
 use crate::state::{field_to_hex, ChainMeta, EncryptedNoteStore, NoteTree, NullifierSet};
@@ -1175,10 +1175,10 @@ impl TonklRpcServer for RpcServer {
         let all_nullifiers: Vec<FieldElement> =
             txs.iter().flat_map(|tx| tx.nullifiers.clone()).collect();
 
-        state
-            .mint_policy
-            .validate_block_mints(&state.chain_meta, &txs)
-            .map_err(invalid_params)?;
+        // SECURITY (consensus gate): anchor validity + mint authority/supply,
+        // the same invariants validate_and_apply_block enforces for ingested blocks.
+        enforce_consensus_rules(&state.chain_meta, &state.mint_policy, &txs)
+            .map_err(|e| invalid_params(e.to_string()))?;
 
         for tx in &txs {
             for cm in &tx.new_commitments {

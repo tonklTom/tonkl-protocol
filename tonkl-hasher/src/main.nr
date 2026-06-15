@@ -30,12 +30,14 @@ fn p2(state: [Field; 4]) -> [Field; 4] {
 }
 
 fn hash_2(a: Field, b: Field) -> Field {
-    let state = p2([a, b, 0, 0]);
+    // capacity IV = 2 (arity tag) - domain-separates hash_2 from hash_3/hash_7
+    let state = p2([a, b, 0, 2]);
     state[0]
 }
 
 fn hash_3(a: Field, b: Field, c: Field) -> Field {
-    let state = p2([a, b, c, 0]);
+    // capacity IV = 3 (arity tag)
+    let state = p2([a, b, c, 3]);
     state[0]
 }
 
@@ -44,7 +46,8 @@ fn hash_7(
     d: Field, e: Field, f: Field,
     g: Field,
 ) -> Field {
-    let s1 = p2([a, b, c, 0]);
+    // capacity IV = 7 (arity tag), preserved across all 3 permutations
+    let s1 = p2([a, b, c, 7]);
     let s2 = p2([s1[0] + d, s1[1] + e, s1[2] + f, s1[3]]);
     let s3 = p2([s2[0] + g, s2[1], s2[2], s2[3]]);
     s3[0]

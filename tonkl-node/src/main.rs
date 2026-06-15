@@ -720,16 +720,14 @@ async fn run_block_producer_with_broadcast(
                     continue;
                 }
 
-                // SECURITY: re-validate mint authority/supply and Merkle anchors
-                // before committing, mirroring the external block-apply path.
-                // Mempool admission already enforces these, but the leader must
+                // SECURITY (consensus gate): anchor validity + mint authority/supply,
+                // the same invariants validate_and_apply_block enforces for ingested
+                // blocks. Mempool admission already checks these, but the leader must
                 // never commit a block that violates them.
-                if let Err(e) = s.mint_policy.validate_block_mints(&s.chain_meta, &txs) {
-                    warn!("Block #{} rejected by mint policy: {}", next_block, e);
-                    continue;
-                }
-                if let Err(e) = tonkl_node::block::ensure_known_anchors(&s.chain_meta, &txs) {
-                    warn!("Block #{} rejected: unknown anchor: {}", next_block, e);
+                if let Err(e) =
+                    tonkl_node::block::enforce_consensus_rules(&s.chain_meta, &s.mint_policy, &txs)
+                {
+                    warn!("Block #{} rejected by consensus gate: {}", next_block, e);
                     continue;
                 }
 

@@ -53,7 +53,8 @@ fn p2(state: [Field; 4]) -> [Field; 4] {
 // Domain: the zero padding in positions 2 and 3 naturally separates this
 // from hash_3 (which fills all 3 rate elements).
 pub fn hash_2(a: Field, b: Field) -> Field {
-    let state = p2([a, b, 0, 0]);
+    // capacity IV = 2 (arity tag) - domain-separates hash_2 from hash_3/hash_7
+    let state = p2([a, b, 0, 2]);
     state[0]
 }
 
@@ -61,7 +62,8 @@ pub fn hash_2(a: Field, b: Field) -> Field {
 //
 // Fills the full rate (3 elements), capacity stays 0, permutes once.
 pub fn hash_3(a: Field, b: Field, c: Field) -> Field {
-    let state = p2([a, b, c, 0]);
+    // capacity IV = 3 (arity tag)
+    let state = p2([a, b, c, 3]);
     state[0]
 }
 
@@ -79,8 +81,8 @@ pub fn hash_7(
     d: Field, e: Field, f: Field,
     g: Field,
 ) -> Field {
-    // Phase 1: absorb first 3 inputs
-    let s1 = p2([a, b, c, 0]);
+    // Phase 1: absorb first 3 inputs (capacity IV = 7 arity tag, preserved across all 3 permutations)
+    let s1 = p2([a, b, c, 7]);
     // Phase 2: XOR next 3 inputs into rate
     let s2 = p2([s1[0] + d, s1[1] + e, s1[2] + f, s1[3]]);
     // Phase 3: XOR final input into state[0], pad rest

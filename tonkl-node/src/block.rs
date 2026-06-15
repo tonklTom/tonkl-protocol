@@ -17,6 +17,7 @@
 //   - New commitments to insert into the note tree
 //   - Nullifiers to insert into the nullifier set (except mint)
 
+use crate::rpc::MintPolicy;
 use crate::state::{field_to_hex, ChainMeta, NoteTree, NullifierSet, StateError};
 use crate::verifier::{serialize_public_inputs, ProofVerifier};
 use serde::{Deserialize, Serialize};
@@ -176,6 +177,7 @@ pub enum ValidationError {
         current_root: String,
     },
     ProofVerificationFailed(String),
+    MintPolicy(String),
     EmptyBlock,
 }
 
@@ -208,6 +210,7 @@ impl std::fmt::Display for ValidationError {
                 )
             }
             Self::ProofVerificationFailed(msg) => write!(f, "proof verification failed: {}", msg),
+            Self::MintPolicy(msg) => write!(f, "mint policy violation: {}", msg),
             Self::EmptyBlock => write!(f, "empty block"),
         }
     }
@@ -407,6 +410,25 @@ pub fn ensure_known_anchors(
     Ok(())
 }
 
+/// SECURITY (single consensus gate): the invariants every block-apply path MUST
+/// enforce before mutating state — anchor validity (anti-counterfeiting) and
+/// mint authority/supply policy. Co-located here so no apply path can silently
+/// skip one. `validate_and_apply_block` calls this internally; the direct-apply
+/// production paths (consensus leader, RPC produce_block) call it explicitly.
+pub fn enforce_consensus_rules(
+    chain_meta: &ChainMeta,
+    mint_policy: &MintPolicy,
+    txs: &[Transaction],
+) -> Result<(), ValidationError> {
+    // Anti-counterfeiting: input-consuming txs must anchor to a committed root.
+    ensure_known_anchors(chain_meta, txs)?;
+    // Supply soundness: only registered authorities mint, within supply caps.
+    mint_policy
+        .validate_block_mints(chain_meta, txs)
+        .map_err(ValidationError::MintPolicy)?;
+    Ok(())
+}
+
 fn expected_tx_hash(tx: &Transaction) -> [u8; 32] {
     let mut hasher = blake3::Hasher::new();
     hasher.update(&tx.proof);
@@ -451,6 +473,8 @@ fn validate_and_apply_block_inner(
     verifier: Option<&ProofVerifier>,
     note_tree: &mut NoteTree,
     nullifier_set: &mut NullifierSet,
+    chain_meta: &ChainMeta,
+    mint_policy: &MintPolicy,
     expected_block_number: u64,
     expected_parent_hash: [u8; 32],
 ) -> Result<(), ValidationError> {
@@ -471,6 +495,11 @@ fn validate_and_apply_block_inner(
             validate_transaction_proof(tx, verifier)?;
         }
     }
+
+    // 2.5 Consensus gate (anti-counterfeiting + supply soundness): anchor
+    // validity and mint authority/supply, enforced here so this apply path can
+    // never skip them. Runs before any state mutation.
+    enforce_consensus_rules(chain_meta, mint_policy, &block.transactions)?;
 
     // 3. Collect all nullifiers in this block, check for intra-block conflicts
     let mut block_nullifiers = std::collections::HashSet::new();
@@ -527,6 +556,8 @@ pub fn validate_and_apply_block(
     verifier: &ProofVerifier,
     note_tree: &mut NoteTree,
     nullifier_set: &mut NullifierSet,
+    chain_meta: &ChainMeta,
+    mint_policy: &MintPolicy,
     expected_block_number: u64,
     expected_parent_hash: [u8; 32],
 ) -> Result<(), ValidationError> {
@@ -535,6 +566,8 @@ pub fn validate_and_apply_block(
         Some(verifier),
         note_tree,
         nullifier_set,
+        chain_meta,
+        mint_policy,
         expected_block_number,
         expected_parent_hash,
     )
@@ -545,6 +578,8 @@ fn validate_and_apply_block_unverified_for_test(
     block: &Block,
     note_tree: &mut NoteTree,
     nullifier_set: &mut NullifierSet,
+    chain_meta: &ChainMeta,
+    mint_policy: &MintPolicy,
     expected_block_number: u64,
     expected_parent_hash: [u8; 32],
 ) -> Result<(), ValidationError> {
@@ -553,6 +588,8 @@ fn validate_and_apply_block_unverified_for_test(
         None,
         note_tree,
         nullifier_set,
+        chain_meta,
+        mint_policy,
         expected_block_number,
         expected_parent_hash,
     )
@@ -569,6 +606,11 @@ mod tests {
 
     fn temp_db() -> sled::Db {
         sled::Config::new().temporary(true).open().unwrap()
+    }
+
+    /// A mint policy with no registered authorities (any mint is rejected).
+    fn empty_policy() -> MintPolicy {
+        MintPolicy::from_json("{}").unwrap()
     }
 
     fn tx_hash_for(proof: &[u8], public_inputs: &[String]) -> [u8; 32] {
@@ -647,11 +689,14 @@ mod tests {
         let state_root = field_to_hex(note_tree.root().unwrap());
         let mut builder = BlockBuilder::new();
         let block = builder.build_block(vec![], state_root);
+        let chain_meta = ChainMeta::open(&db).unwrap();
 
         let result = validate_and_apply_block_unverified_for_test(
             &block,
             &mut note_tree,
             &mut nf_set,
+            &chain_meta,
+            &empty_policy(),
             0,
             [0u8; 32],
         );
@@ -659,15 +704,17 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_block_with_mint_tx() {
+    fn test_validate_rejects_unregistered_mint() {
+        // SECURITY (supply soundness): a mint for an asset with no registered
+        // authority must be rejected by the consensus gate before any state
+        // mutation — even on the unverified apply path.
         let db = temp_db();
         let mut note_tree = NoteTree::open(&db).unwrap();
         let mut nf_set = NullifierSet::open(&db).unwrap();
+        let chain_meta = ChainMeta::open(&db).unwrap();
 
-        // Create a mint transaction (no nullifiers)
         let cm1 = FieldElement::from(1111u128);
         let cm2 = FieldElement::from(2222u128);
-
         let tx = Transaction {
             tx_type: TxType::Mint,
             tx_hash: [0u8; 32],
@@ -680,24 +727,20 @@ mod tests {
             asset_id: FieldElement::from(1u128),
         };
 
-        // Pre-apply to get expected root
-        let mut preview_tree = NoteTree::open(&temp_db()).unwrap();
-        preview_tree.insert(cm1).unwrap();
-        preview_tree.insert(cm2).unwrap();
-        let expected_root = field_to_hex(preview_tree.root().unwrap());
-
         let mut builder = BlockBuilder::new();
-        let block = builder.build_block(vec![tx], expected_root);
+        let block = builder.build_block(vec![tx], field_to_hex(FieldElement::zero()));
 
         let result = validate_and_apply_block_unverified_for_test(
             &block,
             &mut note_tree,
             &mut nf_set,
+            &chain_meta,
+            &empty_policy(),
             0,
             [0u8; 32],
         );
-        assert!(result.is_ok());
-        assert_eq!(note_tree.leaf_count(), 2);
+        assert!(matches!(result, Err(ValidationError::MintPolicy(_))));
+        assert_eq!(note_tree.leaf_count(), 0);
     }
 
     #[test]
@@ -713,10 +756,13 @@ mod tests {
         let block = builder.build_block(vec![], "root".to_string());
 
         // Try to apply as block 0 — should fail
+        let chain_meta = ChainMeta::open(&db).unwrap();
         let result = validate_and_apply_block_unverified_for_test(
             &block,
             &mut note_tree,
             &mut nf_set,
+            &chain_meta,
+            &empty_policy(),
             0,
             [0u8; 32],
         );
@@ -751,10 +797,17 @@ mod tests {
         let mut builder = BlockBuilder::new();
         let block = builder.build_block(vec![tx], state_root);
 
+        // Record the tx's anchor so it clears the anchor gate and the test
+        // actually exercises duplicate-nullifier rejection.
+        let chain_meta = ChainMeta::open(&db).unwrap();
+        chain_meta.record_anchor(&FieldElement::zero()).unwrap();
+
         let result = validate_and_apply_block_unverified_for_test(
             &block,
             &mut note_tree,
             &mut nf_set,
+            &chain_meta,
+            &empty_policy(),
             0,
             [0u8; 32],
         );
@@ -776,9 +829,10 @@ mod tests {
         let mut builder = BlockBuilder::new();
         let block = builder.build_block(vec![tx], expected_root);
         let verifier = ProofVerifier::disabled();
+        let chain_meta = ChainMeta::open(&db).unwrap();
 
         let result =
-            validate_and_apply_block(&block, &verifier, &mut note_tree, &mut nf_set, 0, [0u8; 32]);
+            validate_and_apply_block(&block, &verifier, &mut note_tree, &mut nf_set, &chain_meta, &empty_policy(), 0, [0u8; 32]);
 
         assert!(matches!(
             result,
@@ -798,9 +852,10 @@ mod tests {
         let mut builder = BlockBuilder::new();
         let block = builder.build_block(vec![tx], field_to_hex(FieldElement::zero()));
         let verifier = ProofVerifier::disabled();
+        let chain_meta = ChainMeta::open(&db).unwrap();
 
         let result =
-            validate_and_apply_block(&block, &verifier, &mut note_tree, &mut nf_set, 0, [0u8; 32]);
+            validate_and_apply_block(&block, &verifier, &mut note_tree, &mut nf_set, &chain_meta, &empty_policy(), 0, [0u8; 32]);
 
         assert!(matches!(
             result,
@@ -821,9 +876,10 @@ mod tests {
         let mut builder = BlockBuilder::new();
         let block = builder.build_block(vec![tx], field_to_hex(FieldElement::zero()));
         let verifier = ProofVerifier::disabled();
+        let chain_meta = ChainMeta::open(&db).unwrap();
 
         let result =
-            validate_and_apply_block(&block, &verifier, &mut note_tree, &mut nf_set, 0, [0u8; 32]);
+            validate_and_apply_block(&block, &verifier, &mut note_tree, &mut nf_set, &chain_meta, &empty_policy(), 0, [0u8; 32]);
 
         assert!(matches!(
             result,
@@ -843,9 +899,10 @@ mod tests {
         let block = builder.build_block(vec![tx], field_to_hex(FieldElement::zero()));
         let vk_dir = tempfile::TempDir::new().unwrap();
         let verifier = ProofVerifier::from_vk_dir(vk_dir.path(), "bb").unwrap();
+        let chain_meta = ChainMeta::open(&db).unwrap();
 
         let result =
-            validate_and_apply_block(&block, &verifier, &mut note_tree, &mut nf_set, 0, [0u8; 32]);
+            validate_and_apply_block(&block, &verifier, &mut note_tree, &mut nf_set, &chain_meta, &empty_policy(), 0, [0u8; 32]);
 
         assert!(matches!(
             result,
@@ -894,5 +951,34 @@ mod tests {
             asset_id: FieldElement::from(1u128),
         };
         assert!(ensure_known_anchors(&chain_meta, &[tx]).is_ok());
+    }
+
+    #[test]
+    fn test_apply_rejects_unknown_anchor_before_mutation() {
+        // SECURITY (anti-counterfeiting, integration): the consensus gate inside
+        // the apply path rejects a transfer anchored to a never-committed root,
+        // BEFORE any state mutation. Uses the unverified path to isolate the gate
+        // (the verified path would reject at proof verification first).
+        let db = temp_db();
+        let mut note_tree = NoteTree::open(&db).unwrap();
+        let mut nf_set = NullifierSet::open(&db).unwrap();
+        let chain_meta = ChainMeta::open(&db).unwrap();
+        // Anchor (root 0) is intentionally NOT recorded.
+
+        let tx = valid_transfer_tx(); // merkle_root = 0
+        let mut builder = BlockBuilder::new();
+        let block = builder.build_block(vec![tx], field_to_hex(FieldElement::zero()));
+
+        let result = validate_and_apply_block_unverified_for_test(
+            &block,
+            &mut note_tree,
+            &mut nf_set,
+            &chain_meta,
+            &empty_policy(),
+            0,
+            [0u8; 32],
+        );
+        assert!(matches!(result, Err(ValidationError::StaleTransaction { .. })));
+        assert_eq!(note_tree.leaf_count(), 0);
     }
 }
